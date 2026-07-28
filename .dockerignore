@@ -1,0 +1,33 @@
+# 1. 파이썬 가상환경 및 패키지 제외 (컨테이너 내부에서 새로 설치하므로 필수 제외)
+venv/
+.venv/
+env/
+
+# 2. 보안 민감 파일 제외 (.env가 컨테이너 이미지에 직접 올라가는 것 방지)
+.env
+.env.*
+
+# 3. 파이썬 바이트코드 및 캐시 파일 제외
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# 4. 로컬 Chroma Vector DB 저장소 제외 (서버 환경 DB와 분리 및 용량 절감)
+.chroma/
+
+# 5. Git 버전 관리 관련 내역 제외
+.git/
+.github/
+.gitignore
+
+# 6. IDE 및 에디터 설정 파일 제외
+.vscode/
+.idea/
+
+# 7. Docker 빌드 관련 문서 및 로그 파일 제외
+Dockerfile
+.dockerignore
+*.log
+README.md
