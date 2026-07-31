@@ -1,0 +1,31 @@
+[
+  {
+    "product_id": "CARD_001",
+    "product_name": "KB K-패스 라이더 혜택 카드",
+    "product_type": "CARD",
+    "provider": "KB국민카드",
+    "summary": "주유/충전소 10% 할인, 야간 주행(22시~04시) 이용 금액 5% 추가 적립. 비 오는 날 대중교통 이용 시 캐시백 제공.",
+    "target_group": "배달 라이더, 대리운전 기사",
+    "njob_trend_tip": "야간 및 우천 시 이동 경비 절감에 최적화된 카드입니다.",
+    "details": {
+      "annual_fee": 12000,
+      "previous_month_spend": 300000,
+      "card_type": "CREDIT",
+      "discount_rate": 0.10
+    }
+  },
+  {
+    "product_id": "SAVINGS_001",
+    "product_name": "KB 마이핏 자유적금",
+    "product_type": "SAVINGS",
+    "provider": "KB국민은행",
+    "summary": "N잡 부수입 이체 실적 충족 시 우대금리 연 4.5% 제공. 자유 적립식으로 비정기 소득 관리에 유용.",
+    "target_group": "N잡러, 프리랜서",
+    "njob_trend_tip": "불규칙한 부수입이 들어올 때마다 자유롭게 적립하여 이자 수익을 극대화할 수 있습니다.",
+    "details": {
+      "interest_rate": 4.5,
+      "interest_type": "단리",
+      "save_period_month": 12
+    }
+  }
+]
