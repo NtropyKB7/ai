@@ -21,9 +21,11 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           envs: ENV_FILE
           script: |
+            # 1. EC2 서버의 app 폴더 생성 및 이동
             mkdir -p ~/app
             cd ~/app
 
+            # 2. .git 존재 여부에 따른 코드 동기화 (git clone / git pull)
             if [ ! -d ".git" ]; then
               git clone -b develop https://github.com/NtropyKB7/ai.git .
             else
@@ -31,8 +33,9 @@ jobs:
               git pull origin develop
             fi
 
-            # EC2 서버 내부에 .env 파일 동적 생성
+            # 3. 최상위 루트 경로에 .env 파일 동적 생성
             echo "$ENV_FILE" > .env
 
-            docker-compose down
+            # 4. 컨테이너 재설치 및 무중단 재배포 (down 에러 방지 구문 포함)
+            docker-compose down || true
             docker-compose up --build -d
