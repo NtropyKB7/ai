@@ -34,5 +34,6 @@ jobs:
             # EC2 서버 내부에 .env 파일 동적 생성
             echo "$ENV_FILE" > .env
 
-            docker-compose down
+            docker-compose down || true
             docker-compose up --build -d
+
