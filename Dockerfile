@@ -14,7 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 4. 의존성 라이브러리 파일 복사 및 설치 (Docker 캐시 레이어 활용)
-# 소스 코드가 변경되어도 requirements.txt가 바뀌지 않았다면 이 단계는 캐시되어 빌드 속도가 빨라짐
+# CPU 전용 PyTorch를 명시적으로 먼저 설치하여 수 GB에 달하는 불필요한 CUDA 라이브러리 다운로드를 차단
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
 COPY requirements.txt .
 
 # --no-cache-dir 옵션을 사용하여 pip 캐시를 저장하지 않고 설치하여 컨테이너 이미지를 한 번 더 경량화
