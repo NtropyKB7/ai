@@ -7,3 +7,4 @@ chromadb
 tiktoken
 python-dotenv
 langchain-huggingface
+sentence-transformers
