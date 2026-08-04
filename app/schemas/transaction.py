@@ -183,12 +183,56 @@ class TransactionClassificationResult(BaseModel):
     )
 
 
-class TransactionClassificationResponse(BaseModel):
+class TransactionClassificationData(BaseModel):
     """
-    소비 내역 일괄 분류 API의 최종 응답 DTO입니다.
+    공통 API 응답의 data 내부에 들어갈 실제 분류 결과입니다.
+
+    공통 응답 구조:
+    {
+        "success": true,
+        "status_code": 200,
+        "message": "...",
+        "data": {
+            "results": [...]
+        }
+    }
     """
 
+    # 거래별 분류 결과 목록입니다.
     results: list[TransactionClassificationResult] = Field(
         ...,
         description="거래별 분류 결과 목록",
+    )
+
+
+class TransactionClassificationResponse(BaseModel):
+    """
+    소비 내역 일괄 분류 API의 최종 성공 응답 DTO입니다.
+
+    팀 공통 응답 형식인
+    success, status_code, message, data 구조를 따릅니다.
+    """
+
+    # 요청 성공 여부입니다.
+    success: bool = Field(
+        ...,
+        description="요청 성공 여부",
+    )
+
+    # HTTP 상태 코드입니다.
+    status_code: int = Field(
+        ...,
+        description="HTTP 상태 코드",
+    )
+
+    # 요청 처리 결과를 설명하는 메시지입니다.
+    message: str = Field(
+        ...,
+        description="응답 메시지",
+    )
+
+    # 실제 소비 내역 분류 결과입니다.
+    data: TransactionClassificationData = Field(
+        ...,
+        description="소비 내역 분류 결과 데이터",
     )
