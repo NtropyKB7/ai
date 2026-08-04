@@ -1,4 +1,11 @@
 # app/services/transaction_classification_service.py
+import json
+import logging
+
+# LLM 호출 또는 JSON 검증 실패 상황을 기록하기 위한 logger입니다.
+logger = logging.getLogger(__name__)
+
+from pydantic import ValidationError
 
 # DTO와 Enum은 #10에서 만든 transaction.py 파일에서 가져옵니다.
 from app.schemas.transaction import (
@@ -7,10 +14,14 @@ from app.schemas.transaction import (
     TransactionClassificationResult,
     TransactionForClassification,
     TransactionType,
+    LLMTransactionClassificationResponse,
 )
 
 
 class TransactionClassificationService:
+
+    
+
     """
     거래 내역을 규칙 기반으로 분류하는 서비스입니다.
 
@@ -18,6 +29,9 @@ class TransactionClassificationService:
     오직 '거래 1건을 받아 분류 결과 1건을 만드는 일'만 담당합니다.
     """
 
+    # 이 값보다 confidence가 낮으면 LLM 보조 분류 대상으로 봅니다.
+    LOW_CONFIDENCE_THRESHOLD = 0.70
+    
     # 소비가 아닌 거래를 판단하는 키워드입니다.
     # 입금(IN)은 아래 키워드를 확인하기 전에 바로 비소비로 처리합니다.
     NON_CONSUMPTION_KEYWORDS = (
@@ -167,6 +181,72 @@ class TransactionClassificationService:
             for transaction in transactions
         ]
 
+    async def classify_transactions_with_llm(
+        self,
+        transactions: list[TransactionForClassification],
+        llm_client=None,
+    ) -> list[TransactionClassificationResult]:
+        """
+        규칙 기반 분류 후, 불확실한 거래만 LLM으로 보완 분류합니다.
+
+        llm_client는 실제 운영에서는 전달하지 않습니다.
+        테스트에서는 가짜 LLM 객체를 넣어 외부 API 호출 없이 검증할 수 있습니다.
+        """
+
+        # 1. 우선 모든 거래를 기존 규칙으로 분류합니다.
+        rule_results = self.classify_transactions(transactions)
+
+        # 2. OTHER이거나 낮은 confidence를 가진 결과만 LLM 대상으로 선별합니다.
+        target_transaction_ids = {
+            result.transactionId
+            for result in rule_results
+            if self._is_llm_target(result)
+        }
+
+        # LLM 보조 분류가 필요한 거래가 없다면 규칙 결과를 그대로 반환합니다.
+        if not target_transaction_ids:
+            return rule_results
+
+        # 원본 거래 목록에서 LLM 대상 거래만 추립니다.
+        target_transactions = [
+            transaction
+            for transaction in transactions
+            if transaction.transactionId in target_transaction_ids
+        ]
+
+        try:
+            # 실제 운영 환경에서는 이 시점에만 LLM 서비스를 import합니다.
+            # 그래서 규칙 기반 단위 테스트는 OPENAI_API_KEY 없이도 실행할 수 있습니다.
+            if llm_client is None:
+                from app.services.llm_service import llm_service
+
+                llm_client = llm_service
+
+            # 3. 저신뢰도 거래들을 한 번에 LLM으로 전달합니다.
+            raw_llm_response = await llm_client.classify_low_confidence_transactions(
+                target_transactions,
+            )
+
+            # 4. LLM이 반환한 JSON을 파싱하고 DTO로 검증합니다.
+            llm_results = self._parse_llm_results(raw_llm_response)
+
+            # 5. 검증된 LLM 결과와 기존 규칙 결과를 병합합니다.
+            return self._merge_llm_results(
+                rule_results=rule_results,
+                llm_results=llm_results,
+                target_transaction_ids=target_transaction_ids,
+            )
+
+        except Exception as error:
+            # LLM 호출 실패, JSON 파싱 실패, DTO 검증 실패가 발생해도
+            # 전체 API를 실패시키지 않고 기존 규칙 결과를 반환합니다.
+            logger.warning(
+                "LLM 거래 보조 분류에 실패하여 규칙 기반 결과를 반환합니다: %s",
+                error,
+            )
+
+            return rule_results
+
     def classify_transaction(
         self,
         transaction: TransactionForClassification,
@@ -302,4 +382,116 @@ class TransactionClassificationService:
             category=None,
             expenseType=None,
             confidence=confidence,
+        )
+
+
+    def _is_llm_target(
+        self,
+        result: TransactionClassificationResult,
+    ) -> bool:
+        """
+        LLM 보조 분류가 필요한 거래인지 판단합니다.
+
+        OTHER 카테고리이거나 confidence가 기준값보다 낮으면 대상입니다.
+        """
+
+        return (
+            result.category == ExpenseCategory.OTHER
+            or result.confidence < self.LOW_CONFIDENCE_THRESHOLD
+        )
+
+    def _parse_llm_results(
+        self,
+        raw_llm_response: str,
+    ) -> list[TransactionClassificationResult]:
+        """
+        LLM 원본 응답을 JSON으로 변환하고 DTO로 검증합니다.
+
+        허용되지 않은 category, expenseType, confidence 범위는
+        Pydantic ValidationError가 발생하여 fallback 처리됩니다.
+        """
+
+        # LLM이 실수로 ```json 코드 블록을 포함한 경우를 대비해 제거합니다.
+        cleaned_response = self._remove_markdown_code_block(raw_llm_response)
+
+        # JSON 문자열을 Python 딕셔너리로 변환합니다.
+        response_data = json.loads(cleaned_response)
+
+        # LLM 응답 구조와 Enum 값을 검증합니다.
+        validated_response = LLMTransactionClassificationResponse.model_validate(
+            response_data,
+        )
+
+        return validated_response.results
+
+    @staticmethod
+    def _remove_markdown_code_block(raw_response: str) -> str:
+        """
+        ```json ... ``` 형태로 응답한 경우 코드 블록 표시만 제거합니다.
+        """
+
+        response = raw_response.strip()
+
+        if not response.startswith("```"):
+            return response
+
+        lines = response.splitlines()
+
+        # 첫 번째 줄의 ``` 또는 ```json을 제거합니다.
+        lines = lines[1:]
+
+        # 마지막 줄이 ```이면 제거합니다.
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+
+        return "\n".join(lines).strip()
+
+    def _merge_llm_results(
+        self,
+        rule_results: list[TransactionClassificationResult],
+        llm_results: list[TransactionClassificationResult],
+        target_transaction_ids: set[int],
+    ) -> list[TransactionClassificationResult]:
+        """
+        LLM이 정상적으로 반환한 대상 거래만 규칙 결과 대신 사용합니다.
+
+        - 대상이 아닌 거래: 기존 규칙 결과 유지
+        - LLM이 누락한 거래: 기존 규칙 결과 유지
+        - LLM이 모르는 transactionId를 반환: 무시
+        - LLM 결과의 소비/카테고리 관계가 이상함: 무시
+        """
+
+        # 대상 거래이고, 의미적으로도 올바른 LLM 결과만 저장합니다.
+        valid_llm_results = {
+            result.transactionId: result
+            for result in llm_results
+            if result.transactionId in target_transaction_ids
+            and self._is_semantically_valid_llm_result(result)
+        }
+
+        # 기존 거래 순서가 유지되도록 결과를 병합합니다.
+        return [
+            valid_llm_results.get(rule_result.transactionId, rule_result)
+            for rule_result in rule_results
+        ]
+
+    @staticmethod
+    def _is_semantically_valid_llm_result(
+        result: TransactionClassificationResult,
+    ) -> bool:
+        """
+        Enum 검증만으로 확인할 수 없는 소비 여부와 null 관계를 확인합니다.
+        """
+
+        # 비소비라면 category와 expenseType은 둘 다 null이어야 합니다.
+        if not result.isConsumption:
+            return (
+                result.category is None
+                and result.expenseType is None
+            )
+
+        # 소비라면 category와 expenseType이 둘 다 있어야 합니다.
+        return (
+            result.category is not None
+            and result.expenseType is not None
         )

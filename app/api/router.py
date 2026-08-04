@@ -112,28 +112,26 @@ async def recommend_product(request: ProductRecommendationRequest):
     summary="소비 내역 일괄 분류",
     description=(
         "Spring AI-service가 전달한 거래 내역 목록을 규칙 기반으로 분류합니다. "
+        "규칙으로 분류하기 어려운 거래만 LLM 보조 분류를 수행합니다. "
         "FastAPI는 분류 결과만 반환하며 Spring RDB에 직접 저장하지 않습니다."
     ),
 )
-def classify_transactions(
+async def classify_transactions(
     request: TransactionClassificationRequest,
 ) -> TransactionClassificationResponse:
     """
-    거래 내역 여러 건을 한 번에 분류하는 API입니다.
+    거래 내역 여러 건을 일괄 분류하는 API입니다.
 
-    처리 흐름:
-    1. Spring이 transactions 목록을 FastAPI로 전달합니다.
-    2. 규칙 기반 분류 서비스를 호출합니다.
-    3. 거래별 분류 결과를 공통 응답 구조로 반환합니다.
-    4. Spring account-service가 transactionId 기준으로 TXN_ANALYSIS에 저장합니다.
+    1. 모든 거래를 규칙 기반으로 분류합니다.
+    2. OTHER 또는 저신뢰도 거래만 LLM으로 보완합니다.
+    3. LLM 실패 시 규칙 기반 결과를 그대로 반환합니다.
     """
 
-    # 요청에 포함된 모든 거래를 한 번에 분류합니다.
-    results = transaction_classification_service.classify_transactions(
+    # 규칙 분류와 LLM 보조 분류를 함께 수행합니다.
+    results = await transaction_classification_service.classify_transactions_with_llm(
         request.transactions,
     )
 
-    # 팀 공통 API 응답 형식으로 감싸서 반환합니다.
     return TransactionClassificationResponse(
         success=True,
         status_code=status.HTTP_200_OK,

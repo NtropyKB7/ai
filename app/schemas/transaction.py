@@ -236,3 +236,16 @@ class TransactionClassificationResponse(BaseModel):
         ...,
         description="소비 내역 분류 결과 데이터",
     )
+
+class LLMTransactionClassificationResponse(BaseModel):
+    """
+    LLM이 반환하는 거래 분류 JSON의 형식입니다.
+
+    LLM 응답의 category와 expenseType은
+    TransactionClassificationResult의 Enum 검증을 통과해야만 사용됩니다.
+    """
+
+    results: list[TransactionClassificationResult] = Field(
+        ...,
+        description="LLM이 보조 분류한 거래 결과 목록",
+    )

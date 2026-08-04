@@ -17,6 +17,9 @@ from app.services.transaction_classification_service import (
     TransactionClassificationService,
 )
 
+import asyncio
+import json
+
 
 # 모든 테스트에서 재사용할 서비스 객체입니다.
 service = TransactionClassificationService()
@@ -207,3 +210,86 @@ def test_bulk_classification_returns_all_results():
     assert len(results) == 2
     assert results[0].transactionId == 1001
     assert results[1].transactionId == 1002
+
+
+class FakeLLMService:
+    """
+    실제 OpenAI API를 호출하지 않고,
+    정상 LLM 응답을 흉내 내는 테스트용 객체입니다.
+    """
+
+    async def classify_low_confidence_transactions(self, transactions):
+        return json.dumps(
+            {
+                "results": [
+                    {
+                        "transactionId": transactions[0].transactionId,
+                        "isConsumption": True,
+                        "category": "SHOPPING",
+                        "expenseType": "VARIABLE",
+                        "confidence": 0.85,
+                    }
+                ]
+            }
+        )
+
+
+class FailingLLMService:
+    """
+    LLM 호출 실패 상황을 흉내 내는 테스트용 객체입니다.
+    """
+
+    async def classify_low_confidence_transactions(self, transactions):
+        raise RuntimeError("LLM 호출 실패")
+
+
+def test_llm_result_replaces_low_confidence_rule_result():
+    """
+    OTHER 거래가 LLM 보조 분류를 통해
+    SHOPPING / VARIABLE 결과로 교체되는지 확인합니다.
+    """
+
+    transaction = create_transaction(
+        merchantName="알수없는상점",
+        transactionDetails="일반 출금",
+    )
+
+    results = asyncio.run(
+        service.classify_transactions_with_llm(
+            transactions=[transaction],
+            llm_client=FakeLLMService(),
+        )
+    )
+
+    result = results[0]
+
+    assert result.isConsumption is True
+    assert result.category == ExpenseCategory.SHOPPING
+    assert result.expenseType == ExpenseType.VARIABLE
+    assert result.confidence == 0.85
+
+
+def test_llm_failure_keeps_rule_based_result():
+    """
+    LLM 호출이 실패하면 API 전체가 실패하지 않고,
+    기존 OTHER / VARIABLE 규칙 결과를 유지하는지 확인합니다.
+    """
+
+    transaction = create_transaction(
+        merchantName="알수없는상점",
+        transactionDetails="일반 출금",
+    )
+
+    results = asyncio.run(
+        service.classify_transactions_with_llm(
+            transactions=[transaction],
+            llm_client=FailingLLMService(),
+        )
+    )
+
+    result = results[0]
+
+    assert result.isConsumption is True
+    assert result.category == ExpenseCategory.OTHER
+    assert result.expenseType == ExpenseType.VARIABLE
+    assert result.confidence == 0.40
