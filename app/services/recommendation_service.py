@@ -19,22 +19,28 @@ logger = logging.getLogger(__name__)
 
 class RecommendationService:
     """
-    금융상품 추천과 AI 리포트 문구 생성을 담당합니다.
+    금융상품 추천과 AI 리포트 문구 생성을 담당하는 서비스입니다.
+
+    이번 리팩토링의 핵심 목표는 두 가지입니다.
+    1. 추천 상품 선택 로직과 "문구 생성 로직"의 책임을 더 명확히 분리한다.
+    2. LLM 실패 시에도 응답 문구 품질이 크게 떨어지지 않도록 fallback을 보강한다.
 
     설계 원칙:
-    - 원천 거래 전체를 LLM에 보내지 않습니다.
-    - 개인정보성 상세 데이터는 LLM에 보내지 않습니다.
+    - 원천 거래 전체를 LLM에 전달하지 않습니다.
+    - 개인정보성 세부 데이터는 LLM에 전달하지 않습니다.
     - Java AI-service가 전달한 월별 집계 데이터만 사용합니다.
-    - RAG는 상품 후보 검색에만 사용합니다.
-    - 최종 추천 상품 선택은 Python 점수화 로직으로 한 번 더 검증합니다.
+    - RAG는 후보 검색용으로만 사용하고, 최종 추천 선택은 Python 규칙이 보완합니다.
     """
 
     def __init__(self, llm: ChatOpenAI | None = None, chroma=None):
+        # 테스트에서는 외부 LLM 대신 mock 객체를 넣을 수 있도록 주입 구조를 열어둡니다.
         self.llm = llm or ChatOpenAI(
             model="gpt-4o-mini",
             openai_api_key=settings.OPENAI_API_KEY,
             temperature=0.2,
         )
+
+        # 검색 매니저도 주입 가능하게 두어, 테스트에서 외부 의존성을 줄일 수 있게 합니다.
         self.chroma_manager = chroma or chroma_manager
 
     async def generate_recommendation(
@@ -42,11 +48,18 @@ class RecommendationService:
         request: ProductRecommendationRequest,
     ) -> ProductRecommendationResponse:
         """
-        월별 소득·소비 집계 데이터를 기반으로 금융상품 추천 결과를 생성합니다.
+        월별 집계 데이터를 바탕으로 최종 추천 응답을 생성합니다.
+
+        흐름:
+        1. 입력 집계 데이터 해석
+        2. 재무 유형/소비 패턴/잡 인사이트 계산
+        3. RAG 후보 검색
+        4. Python 규칙 점수화로 최종 추천 상품 선택
+        5. LLM으로 문구 품질 보강
+        6. LLM 실패 시 fallback 문구 사용
         """
         category_expenses = self._parse_category_expenses(request.category_expenses)
         financial_type = self._classify_financial_type(request)
-
         financial_activity_insight = self._build_financial_activity_insight(
             request=request,
             category_expenses=category_expenses,
@@ -79,6 +92,17 @@ class RecommendationService:
             category_expenses=category_expenses,
         )
 
+        # 각 응답 필드의 기본값을 먼저 만들어 둡니다.
+        # 이렇게 하면 LLM이 일부 필드만 생성해도 나머지는 안정적으로 채울 수 있습니다.
+        default_texts = self._build_default_response_texts(
+            request=request,
+            product=product,
+            simulated_extra_income=simulated_extra_income,
+            financial_type=financial_type,
+            financial_activity_insight=financial_activity_insight,
+            job_insight=job_insight,
+        )
+
         llm_result = await self._generate_llm_insights(
             request=request,
             product=product,
@@ -89,27 +113,19 @@ class RecommendationService:
             category_expenses=category_expenses,
         )
 
+        merged_texts = self._merge_llm_texts_with_defaults(
+            llm_result=llm_result,
+            default_texts=default_texts,
+        )
+
         return ProductRecommendationResponse(
             recommended_product=product,
             simulated_extra_income=simulated_extra_income,
-            reasoning=llm_result.get(
-                "reasoning",
-                self._fallback_reasoning(
-                    product=product,
-                    simulated_extra_income=simulated_extra_income,
-                    request=request,
-                ),
-            ),
-            financial_activity_insight=llm_result.get(
-                "financial_activity_insight",
-                financial_activity_insight,
-            ),
-            financial_type=llm_result.get("financial_type", financial_type),
-            job_insight=llm_result.get("job_insight", job_insight),
-            future_income_trend=llm_result.get(
-                "future_income_trend",
-                self._fallback_future_income_trend(request),
-            ),
+            reasoning=merged_texts["reasoning"],
+            financial_activity_insight=merged_texts["financial_activity_insight"],
+            financial_type=merged_texts["financial_type"],
+            job_insight=merged_texts["job_insight"],
+            future_income_trend=merged_texts["future_income_trend"],
         )
 
     def _parse_category_expenses(
@@ -119,8 +135,8 @@ class RecommendationService:
         """
         Java에서 전달한 category_expenses JSON 문자열을 파싱합니다.
 
-        현재는 List 형태 JSON 문자열을 기대하지만,
-        과거 Map 구조도 방어적으로 처리합니다.
+        현재는 List 형태 JSON 문자열을 기본으로 기대하지만,
+        이전 호환을 위해 Map 구조도 방어적으로 허용합니다.
         """
         if not category_expenses_text:
             return []
@@ -156,6 +172,12 @@ class RecommendationService:
     ) -> str:
         """
         사용자의 월간 재무 상태를 간단한 규칙으로 분류합니다.
+
+        이 값은:
+        - 최종 추천 상품 선택 점수화
+        - 응답용 financial_type
+        - 문구 생성의 기준 맥락
+        에 모두 사용됩니다.
         """
         total_income = request.total_income or 0
         total_expense = request.total_expense or 0
@@ -188,24 +210,27 @@ class RecommendationService:
         financial_type: str,
     ) -> str:
         """
-        소비·소득 활동을 요약하는 기본 인사이트 문구를 생성합니다.
+        소비·소득 흐름을 설명하는 기본 문구를 생성합니다.
+
+        역할:
+        - "이번 달 재무 활동이 전반적으로 어떤 상태인가"를 요약
+        - 특정 상품 추천 사유(reasoning)와는 분리
         """
         top_category = self._find_top_category(category_expenses)
+        cash_flow_text = self._describe_cash_flow(request)
 
         if top_category:
-            top_category_text = (
-                f"가장 큰 소비 카테고리는 "
-                f"{top_category.displayName or top_category.category}"
-                f"({self._format_won(top_category.amount)})입니다."
+            category_label = top_category.displayName or top_category.category
+            category_text = (
+                f"가장 큰 소비 카테고리는 {category_label}이며, "
+                f"지출 규모는 {self._format_won(top_category.amount)}입니다."
             )
         else:
-            top_category_text = "카테고리별 소비 데이터는 아직 충분하지 않습니다."
+            category_text = "카테고리별 소비 데이터는 아직 충분하지 않습니다."
 
         return (
-            f"이번 달 총소득은 {self._format_won(request.total_income)}, "
-            f"총소비는 {self._format_won(request.total_expense)}, "
-            f"가용자금은 {self._format_won(request.available_funds)}입니다. "
-            f"현재 재무 유형은 {financial_type}이며, {top_category_text}"
+            f"{cash_flow_text} 현재 재무 상태는 {financial_type}에 가깝고, "
+            f"{category_text}"
         )
 
     def _build_job_insight(
@@ -214,6 +239,10 @@ class RecommendationService:
     ) -> str:
         """
         잡별 소득·근무시간·피로도 데이터를 요약합니다.
+
+        역할:
+        - 재무 인사이트와 분리해서 "일/수익 구조"만 요약
+        - 미래 소득 전망 문구와도 겹치지 않도록 현재 상태 중심으로 작성
         """
         if not job_inputs:
             return "잡별 소득·근무시간 데이터가 충분하지 않아 N잡 인사이트를 생성하기 어렵습니다."
@@ -225,20 +254,20 @@ class RecommendationService:
         work_minutes = primary_job.totalWorkMinutes or 0
         work_hours = round(work_minutes / 60, 1) if work_minutes else 0
 
-        fatigue_text = ""
+        fatigue_sentence = ""
         if primary_job.averageFatigue is not None:
-            fatigue_text = f" 평균 피로도는 {primary_job.averageFatigue}입니다."
+            fatigue_sentence = f" 평균 피로도는 {primary_job.averageFatigue} 수준입니다."
 
         if work_hours > 0:
             return (
-                f"{job_name}에서 가장 많은 소득이 발생했습니다. "
+                f"{job_name}에서 가장 큰 소득 비중이 발생했습니다. "
                 f"총소득은 {income_amount}, 총 근무시간은 약 {work_hours}시간입니다."
-                f"{fatigue_text}"
+                f"{fatigue_sentence}"
             )
 
         return (
-            f"{job_name}에서 가장 많은 소득이 발생했습니다. "
-            f"총소득은 {income_amount}입니다.{fatigue_text}"
+            f"{job_name}에서 가장 큰 소득 비중이 발생했습니다. "
+            f"총소득은 {income_amount}입니다.{fatigue_sentence}"
         )
 
     def _build_product_search_query(
@@ -248,7 +277,11 @@ class RecommendationService:
         financial_type: str,
     ) -> str:
         """
-        ChromaDB 검색에 사용할 요약 쿼리 문장을 생성합니다.
+        ChromaDB 검색용 요약 쿼리를 생성합니다.
+
+        주의:
+        - 프롬프트처럼 길게 만들지 않고, 검색에 필요한 핵심 정보만 담습니다.
+        - top category를 1개만 쓰지 않고 상위 2개까지 넣어 검색 편향을 줄입니다.
         """
         top_categories = sorted(
             category_expenses,
@@ -264,9 +297,7 @@ class RecommendationService:
         ]
 
         for category in top_categories:
-            query_parts.append(
-                f"주요 소비 카테고리: {category.category}"
-            )
+            query_parts.append(f"주요 소비 카테고리: {category.category}")
 
         if request.income_change_rate is not None:
             query_parts.append(f"전월 대비 소득 증감률: {request.income_change_rate}")
@@ -313,7 +344,13 @@ class RecommendationService:
         financial_type: str,
     ) -> float:
         """
-        검색 후보 상품 하나에 대한 적합도 점수를 계산합니다.
+        후보 상품 하나의 적합도 점수를 계산합니다.
+
+        큰 방향:
+        - 저축 여력이 있으면 SAVINGS 쪽 가중치
+        - 소비 압박이 크면 CARD 쪽 가중치
+        - 카드면 소비 카테고리 혜택 매칭을 반영
+        - 적금이면 금리와 가용자금/변동성을 반영
         """
         score = 0.0
         product_type = product.get("product_type")
@@ -372,10 +409,7 @@ class RecommendationService:
         if not isinstance(raw_categories, list):
             raw_categories = []
 
-        return {
-            str(category).upper()
-            for category in raw_categories
-        }
+        return {str(category).upper() for category in raw_categories}
 
     def _calculate_simulated_extra_income(
         self,
@@ -451,6 +485,66 @@ class RecommendationService:
 
         return max(matched_categories, key=lambda item: item.amount or 0)
 
+    def _build_default_response_texts(
+        self,
+        request: ProductRecommendationRequest,
+        product: FinancialProductSchema,
+        simulated_extra_income: int,
+        financial_type: str,
+        financial_activity_insight: str,
+        job_insight: str,
+    ) -> dict[str, str]:
+        """
+        각 응답 필드의 기본 문구를 생성합니다.
+
+        이 메서드를 별도로 둔 이유:
+        - 필드별 책임을 명확하게 나누기 위해
+        - LLM이 일부 필드를 누락해도 전체 응답 품질을 유지하기 위해
+        """
+        return {
+            "reasoning": self._fallback_reasoning(
+                product=product,
+                simulated_extra_income=simulated_extra_income,
+                request=request,
+            ),
+            "financial_activity_insight": financial_activity_insight,
+            "financial_type": financial_type,
+            "job_insight": job_insight,
+            "future_income_trend": self._fallback_future_income_trend(request),
+        }
+
+    def _merge_llm_texts_with_defaults(
+        self,
+        llm_result: dict[str, str],
+        default_texts: dict[str, str],
+    ) -> dict[str, str]:
+        """
+        LLM 결과와 fallback 기본값을 병합합니다.
+
+        규칙:
+        - LLM 값이 비어 있거나 너무 짧으면 기본값 유지
+        - financial_type은 과도하게 장황해지지 않도록 정리
+        """
+        merged = dict(default_texts)
+
+        for key, default_value in default_texts.items():
+            llm_value = self._normalize_text(llm_result.get(key))
+
+            if not llm_value:
+                continue
+
+            # 너무 짧은 문구는 품질이 낮다고 보고 기본값을 유지합니다.
+            # 단 financial_type은 라벨형 필드라 예외적으로 짧아도 허용합니다.
+            if key != "financial_type" and len(llm_value) < 8:
+                continue
+
+            merged[key] = llm_value
+
+        merged["financial_type"] = self._normalize_financial_type_label(
+            merged["financial_type"]
+        )
+        return merged
+
     async def _generate_llm_insights(
         self,
         request: ProductRecommendationRequest,
@@ -463,6 +557,9 @@ class RecommendationService:
     ) -> dict[str, str]:
         """
         LLM으로 최종 리포트 문구를 생성합니다.
+
+        여기서는 이미 계산된 요약값만 전달합니다.
+        즉, LLM은 "판단기"라기보다 "설명 문구 보강기" 역할에 가깝습니다.
         """
         category_summary = [
             {
@@ -488,6 +585,9 @@ class RecommendationService:
             for item in request.job_insight_inputs
         ]
 
+        # 프롬프트도 필드별 역할을 더 분명히 적어 주어,
+        # reasoning / financial_activity_insight / job_insight / future_income_trend가
+        # 서로 비슷한 말만 반복하지 않도록 유도합니다.
         prompt = f"""
 당신은 N잡러를 위한 금융상품 추천 및 월간 재무 리포트 작성 전문가입니다.
 
@@ -505,7 +605,7 @@ class RecommendationService:
 - 카테고리별 소비: {json.dumps(category_summary, ensure_ascii=False)}
 - 잡 인사이트 입력: {json.dumps(job_summary, ensure_ascii=False)}
 
-[사전 계산된 판단]
+[사전 계산된 기본 문구]
 - 재무 유형: {financial_type}
 - 재무활동 요약: {financial_activity_insight}
 - 잡 관련 요약: {job_insight}
@@ -518,14 +618,25 @@ class RecommendationService:
 - N잡 활용 팁: {product.njob_trend_tip}
 - 예상 추가 수익 또는 절감액: {simulated_extra_income}원
 
-[작성 규칙]
-1. reasoning은 왜 이 상품이 현재 사용자 상황에 맞는지 직관적으로 설명하세요.
-2. financial_activity_insight는 소비와 소득 흐름을 자연스럽게 요약하세요.
-3. financial_type은 주어진 값을 유지해도 되고, 더 자연스러운 표현으로 다듬어도 됩니다.
-4. job_insight는 잡별 소득, 근무시간, 피로도 관점의 짧은 조언으로 작성하세요.
-5. future_income_trend는 다음 달 소득 흐름과 N잡 코칭 문구로 작성하세요.
-6. 과장된 수익 보장 표현은 금지합니다.
-7. 반드시 JSON 객체만 반환하세요.
+[필드별 작성 책임]
+1. reasoning
+   - 왜 이 상품이 현재 사용자 상황에 맞는지 설명
+   - 상품 특징 + 사용자 재무 상태 + 기대 효과를 자연스럽게 연결
+2. financial_activity_insight
+   - 이번 달 소비/소득 흐름 자체를 요약
+   - 상품 추천 이유와 같은 말 반복 금지
+3. financial_type
+   - 사용자의 재무 상태를 짧은 라벨로 표현
+4. job_insight
+   - 잡별 소득, 근무시간, 피로도 관점의 현재 상태 요약
+5. future_income_trend
+   - 미래를 과장 예측하지 말고, 현재 흐름 기준의 다음 달 관리 조언 제공
+
+[공통 규칙]
+- 과장된 수익 보장 표현은 금지합니다.
+- 각 필드는 서로 다른 역할을 가져야 합니다.
+- 수치 나열만 하지 말고 해석형 문장으로 작성합니다.
+- 반드시 JSON 객체만 반환합니다.
 
 [응답 형식]
 {{
@@ -593,7 +704,11 @@ class RecommendationService:
         request: ProductRecommendationRequest,
     ) -> str:
         """
-        LLM 실패 시 사용할 기본 추천 사유 문구입니다.
+        LLM 실패 시 사용할 reasoning 기본 문구입니다.
+
+        reasoning은 "상품 추천 이유" 전용 필드이므로,
+        financial_activity_insight나 future_income_trend와 겹치지 않게
+        상품 중심으로만 작성합니다.
         """
         if product.product_type == "SAVINGS":
             return (
@@ -612,7 +727,10 @@ class RecommendationService:
         request: ProductRecommendationRequest,
     ) -> str:
         """
-        LLM 실패 시 사용할 미래 소득 트렌드 기본 문구입니다.
+        LLM 실패 시 사용할 future_income_trend 기본 문구입니다.
+
+        미래를 단정적으로 예측하지 않고,
+        "현재 흐름 기준 조언" 형태로 작성합니다.
         """
         if request.income_change_rate is None:
             return "소득 변화 데이터가 아직 충분하지 않아 다음 달 흐름은 추가 관찰이 필요합니다."
@@ -624,6 +742,46 @@ class RecommendationService:
             return "최근 소득이 감소하는 흐름이라면 다음 달에는 생활비 절감과 현금흐름 안정화에 더 집중하는 것이 좋습니다."
 
         return "최근 소득 흐름이 큰 변동 없이 유지되고 있어 안정적인 자금 관리 전략이 적합합니다."
+
+    def _describe_cash_flow(
+        self,
+        request: ProductRecommendationRequest,
+    ) -> str:
+        """
+        총소득/총소비/가용자금을 한 문장으로 읽기 좋게 요약합니다.
+        """
+        return (
+            f"이번 달 총소득은 {self._format_won(request.total_income)}, "
+            f"총소비는 {self._format_won(request.total_expense)}, "
+            f"가용자금은 {self._format_won(request.available_funds)}입니다."
+        )
+
+    def _normalize_text(
+        self,
+        text: str | None,
+    ) -> str:
+        """
+        LLM 결과 문자열의 앞뒤 공백을 정리합니다.
+        """
+        if text is None:
+            return ""
+
+        return str(text).strip()
+
+    def _normalize_financial_type_label(
+        self,
+        text: str,
+    ) -> str:
+        """
+        financial_type 라벨이 지나치게 길어지거나 문장처럼 바뀌는 것을 조금 정리합니다.
+        """
+        normalized = self._normalize_text(text)
+        if not normalized:
+            return "재무 유형 분석 중"
+
+        # 너무 길게 생성되면 앞부분만 사용하지 않고 기본적으로 그대로 두되,
+        # 문장형 표현일 때는 마침표를 제거해 라벨처럼 보이게 만듭니다.
+        return normalized.replace(".", "").strip()
 
     def _format_won(
         self,

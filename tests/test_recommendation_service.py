@@ -3,7 +3,11 @@ import os
 
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
-from app.schemas.product import CategoryExpenseSummary, ProductRecommendationRequest
+from app.schemas.product import (
+    CategoryExpenseSummary,
+    FinancialProductSchema,
+    ProductRecommendationRequest,
+)
 from app.services.recommendation_service import RecommendationService
 
 
@@ -319,3 +323,68 @@ def test_calculate_simulated_extra_income_applies_card_cap():
     )
 
     assert result == 30000
+
+
+def test_build_default_response_texts_contains_all_required_fields():
+    service = RecommendationService()
+
+    request = ProductRecommendationRequest(
+        user_id=1,
+        year_month="2026-07",
+        total_income=4_000_000,
+        total_expense=2_500_000,
+        available_funds=1_500_000,
+    )
+
+    product = FinancialProductSchema(
+        product_id="SAVINGS_001",
+        product_name="자유적금 상품",
+        product_type="SAVINGS",
+        provider="은행",
+        summary="우대금리 적금 상품",
+        target_group="N잡러",
+        njob_trend_tip="부수입 적립",
+        details={"interest_rate": 4.2},
+    )
+
+    texts = service._build_default_response_texts(
+        request=request,
+        product=product,
+        simulated_extra_income=4200,
+        financial_type="저축 여력형",
+        financial_activity_insight="재무활동 요약",
+        job_insight="잡 인사이트",
+    )
+
+    assert set(texts.keys()) == {
+        "reasoning",
+        "financial_activity_insight",
+        "financial_type",
+        "job_insight",
+        "future_income_trend",
+    }
+
+
+def test_merge_llm_texts_with_defaults_keeps_default_when_llm_value_too_short():
+    service = RecommendationService()
+
+    default_texts = {
+        "reasoning": "기본 추천 사유 문구입니다.",
+        "financial_activity_insight": "기본 재무활동 문구입니다.",
+        "financial_type": "저축 여력형",
+        "job_insight": "기본 잡 인사이트 문구입니다.",
+        "future_income_trend": "기본 미래 소득 문구입니다.",
+    }
+
+    llm_result = {
+        "reasoning": "짧음",
+        "financial_type": "저축 여력형.",
+    }
+
+    merged = service._merge_llm_texts_with_defaults(
+        llm_result=llm_result,
+        default_texts=default_texts,
+    )
+
+    assert merged["reasoning"] == "기본 추천 사유 문구입니다."
+    assert merged["financial_type"] == "저축 여력형"
