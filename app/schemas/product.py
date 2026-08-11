@@ -1,61 +1,113 @@
+from typing import Any, Optional
+
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
+
 
 class FinancialProductSchema(BaseModel):
     """
-    FINANCIAL_PRODUCT 지식 DB 원본 및 추천 응답 매핑용 Pydantic DTO.
-    공통 기본 메타데이터와 가변 상세 데이터를 분리하여 유연성을 확보합니다.
+    금융상품 지식 DB 원본과 추천 응답에 사용하는 DTO입니다.
+    ChromaDB에서 검색된 금융상품 정보를 Spring AI-service로 반환할 때 사용합니다.
     """
-    product_id: str = Field(..., description="상품 고유 식별 ID (예: 'CARD_001', 'SAVINGS_001')")
-    product_name: str = Field(..., description="금융 상품명 (예: 'KB K-패스 라이더 혜택 카드')")
-    product_type: str = Field(..., description="상품 유형 구분 ('CARD', 'SAVINGS')")
-    provider: str = Field(..., description="상품 제공 금융사 (예: 'KB국민카드', 'KB국민은행')")
-    summary: str = Field(..., description="RAG 벡터 임베딩 및 유사도 검색용 핵심 혜택 요약 문장")
 
-    target_group: Optional[str] = Field(None, description="주 추천 대상 고객군 (예: '배달 라이더', 'N잡러')")
-    njob_trend_tip: Optional[str] = Field(None, description="해당 상품과 연계 가능한 N잡 수익 창출/활용 팁 문구")
+    product_id: str = Field(..., description="상품 고유 식별 ID")
+    product_name: str = Field(..., description="금융 상품명")
+    product_type: str = Field(..., description="상품 유형. 예: CARD, SAVINGS")
+    provider: str = Field(..., description="상품 제공 금융사")
+    summary: str = Field(..., description="상품 핵심 혜택 요약")
 
-    # 카드(연회비, 실적 조건 등) 및 적금(금리, 기간 등)의 특화 속성을 JSON/Dict 형태로 유연하게 포장
-    details: Optional[Dict[str, Any]] = Field(
+    target_group: Optional[str] = Field(default=None, description="주 추천 대상 고객군")
+    njob_trend_tip: Optional[str] = Field(default=None, description="N잡러 활용 팁")
+
+    details: dict[str, Any] = Field(
         default_factory=dict,
-        description="상품 유형별 상세 가변 속성 (JSON 데이터)"
+        description="상품 유형별 상세 정보",
     )
+
+
+class CategoryExpenseSummary(BaseModel):
+    """
+    Java AI-service가 category_expenses 문자열 안에 넣어 보내는
+    카테고리별 소비 요약 DTO입니다.
+    """
+
+    category: str = Field(..., description="소비 카테고리 코드")
+    displayName: Optional[str] = Field(default=None, description="화면 표시명")
+    amount: int = Field(default=0, description="카테고리별 소비 금액")
+    ratio: Optional[float] = Field(
+        default=None,
+        description="전체 소비 대비 비율. 0~1 사이 소수",
+    )
+
+
+class JobInsightInput(BaseModel):
+    """
+    Java AI-service가 jobId 기준으로 조합해서 전달하는
+    잡별 AI 인사이트 생성용 입력 DTO입니다.
+
+    FastAPI는 work-service 원본 DTO 전체를 받지 않고,
+    AI 판단에 필요한 요약값만 받습니다.
+    """
+
+    jobId: Optional[int] = Field(default=None, description="잡 ID")
+    jobName: Optional[str] = Field(default=None, description="잡 이름")
+    incomeAmount: Optional[int] = Field(default=0, description="잡별 소득 금액")
+    incomeRatio: Optional[float] = Field(
+        default=None,
+        description="전체 소득 대비 잡별 소득 비율. 0~1 사이 소수",
+    )
+    totalWorkMinutes: Optional[int] = Field(default=0, description="잡별 총 근무 시간")
+    workDays: Optional[int] = Field(default=0, description="잡별 근무일수")
+    averageFatigue: Optional[float] = Field(default=None, description="잡별 평균 피로도")
+    latestFatigue: Optional[int] = Field(default=None, description="잡별 최근 피로도")
 
 
 class ProductRecommendationRequest(BaseModel):
     """
-    Spring 메인 서버로부터 전달받는 유저 재무 스냅샷 요청 DTO.
-    RAG 유사도 검색 및 시뮬레이션 연산의 입력값으로 활용됩니다.
+    Spring AI-service가 FastAPI 추천 API로 전달하는 월별 집계 데이터입니다.
+
+    원천 거래 전체가 아니라, 추천과 리포트 문구 생성에 필요한
+    월별 집계 데이터만 받습니다.
     """
-    user_id: int = Field(..., description="유저 PK")
-    year_month: str = Field(..., description="조회 대상 연월 (예: '2026-06')")
-    
-    # 📌 (원 단위) 명시를 통해 수치 단위 혼선 방지
-    available_funds: int = Field(..., description="당월 가용 자금 (총소득 - 총소비, 원 단위, 예: 500000)")
-    
-    # 📌 Optional 필드의 default 값을 default=0 으로 명확히 지정
-    monthly_fuel_expense: Optional[int] = Field(
-        default=0, 
-        description="당월 주유/이동 관련 지출액 (원 단위, 예: 350000. 미입력 시 0)"
+
+    user_id: int = Field(..., description="사용자 ID")
+    year_month: str = Field(..., description="추천 대상 연월. 예: 2026-07")
+
+    total_income: int = Field(default=0, description="해당 월 총소득")
+    total_expense: int = Field(default=0, description="해당 월 총소비")
+    available_funds: int = Field(
+        default=0,
+        description="가용자금. total_income - total_expense",
     )
-    
-    consumption_summary: str = Field(..., description="유저의 당월 소비 특성 텍스트 요약 (Vector DB 쿼리문으로 사용)")
+
+    category_expenses: str = Field(
+        default="[]",
+        description="카테고리별 소비 요약 JSON 문자열",
+    )
+
+    previous_month_income: Optional[int] = Field(default=None, description="전월 총소득")
+    income_change_amount: Optional[int] = Field(default=None, description="전월 대비 소득 증감액")
+    income_change_rate: Optional[float] = Field(
+        default=None,
+        description="전월 대비 소득 증감률. 0~1 사이 소수",
+    )
+    income_volatility: Optional[float] = Field(default=None, description="최근 소득 변동성")
+
+    job_insight_inputs: list[JobInsightInput] = Field(
+        default_factory=list,
+        description="잡별 소득·근무시간·피로도 기반 AI 인사이트 입력 목록",
+    )
 
 
 class ProductRecommendationResponse(BaseModel):
     """
-    FastAPI -> Spring 메인 서버로 최종 반환되는 RAG AI 금융상품 추천 응답 DTO.
-    기획 요구사항(단일 추천 + 시뮬레이션 금액)이 반영되어 있습니다.
+    FastAPI가 Spring AI-service로 반환하는 금융상품 추천 결과 DTO입니다.
     """
-    # RAG 검색을 통해 엄선된 단 1개의 최적 맞춤 상품
-    recommended_product: FinancialProductSchema = Field(..., description="최적의 1개 맞춤 추천 상품")
-    
-    # 기획자 요구 기능: "이때 이 상품을 썼으면 벌었을/절약했을 예상 금액"
-    simulated_extra_income: int = Field(
-        ..., 
-        description="유저가 이 상품을 지불/적립에 활용했을 때 예상되는 추가 이자 수익 또는 절감 금액 (원 단위)"
-    )
-    
-    # LLM이 지식을 주입(Augment)받아 생성한 추천 사유 및 N잡 코칭
-    reasoning: str = Field(..., description="상품 사용 시 이득을 직관적으로 설명하는 추천 사유 문구")
-    future_income_trend: str = Field(..., description="유저 소비/소득 특성을 분석한 미래 수익 트렌드 및 N잡 코칭 문구")
+
+    recommended_product: FinancialProductSchema = Field(..., description="추천 금융상품")
+    simulated_extra_income: int = Field(..., description="예상 추가 수익 또는 절감 금액")
+    reasoning: str = Field(..., description="추천 상품 사용 시 이득을 설명하는 문구")
+
+    financial_activity_insight: str = Field(..., description="소비·소득 활동 요약 인사이트")
+    financial_type: str = Field(..., description="사용자의 재무 유형")
+    job_insight: str = Field(..., description="잡별 소득·근무시간·피로도 기반 인사이트")
+    future_income_trend: str = Field(..., description="미래 소득 트렌드 및 N잡 코칭 문구")

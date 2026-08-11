@@ -110,3 +110,6 @@ Analyze the given list of withdrawal transactions and classify each item into co
                 )
                 for txn in transactions
             ]
+
+# 라우터에서 재사용할 LLM 서비스 싱글톤 객체입니다.
+llm_service = LLMService()
