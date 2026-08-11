@@ -149,12 +149,12 @@ def test_parse_llm_json_with_markdown_block():
 """
     )
 
-
     assert result["reasoning"] == "추천 사유"
     assert result["financial_activity_insight"] == "재무 인사이트"
     assert result["financial_type"] == "저축 여력형"
     assert result["job_insight"] == "잡 인사이트"
     assert result["future_income_trend"] == "미래 소득 전망"
+
 
 def test_parse_llm_json_invalid_text():
     service = RecommendationService()
@@ -162,3 +162,160 @@ def test_parse_llm_json_invalid_text():
     result = service._parse_llm_json("not-json")
 
     assert result == {}
+
+
+def test_select_best_product_prefers_card_for_spending_pressure():
+    service = RecommendationService()
+
+    request = ProductRecommendationRequest(
+        user_id=1,
+        year_month="2026-07",
+        total_income=2_000_000,
+        total_expense=1_900_000,
+        available_funds=100_000,
+    )
+
+    categories = [
+        CategoryExpenseSummary(
+            category="FOOD",
+            displayName="식비",
+            amount=900000,
+            ratio=0.47,
+        )
+    ]
+
+    candidates = [
+        {
+            "product_id": "SAVINGS_001",
+            "product_name": "적금 상품",
+            "product_type": "SAVINGS",
+            "provider": "은행",
+            "summary": "자유적금 상품",
+            "target_group": "N잡러",
+            "njob_trend_tip": "부수입 적립",
+            "details": {"interest_rate": 4.0},
+        },
+        {
+            "product_id": "CARD_001",
+            "product_name": "생활 할인 카드",
+            "product_type": "CARD",
+            "provider": "카드사",
+            "summary": "식비 할인 카드",
+            "target_group": "생활비 관리형",
+            "njob_trend_tip": "식비 절감",
+            "details": {
+                "discount_rate": 0.1,
+                "discount_categories": ["FOOD"],
+            },
+        },
+    ]
+
+    result = service._select_best_product(
+        products=candidates,
+        request=request,
+        category_expenses=categories,
+        financial_type="소비 압박형",
+    )
+
+    assert result["product_id"] == "CARD_001"
+
+
+def test_select_best_product_prefers_savings_for_surplus():
+    service = RecommendationService()
+
+    request = ProductRecommendationRequest(
+        user_id=1,
+        year_month="2026-07",
+        total_income=4_000_000,
+        total_expense=2_000_000,
+        available_funds=2_000_000,
+        income_change_rate=0.12,
+    )
+
+    categories = [
+        CategoryExpenseSummary(
+            category="FOOD",
+            displayName="식비",
+            amount=500000,
+            ratio=0.25,
+        )
+    ]
+
+    candidates = [
+        {
+            "product_id": "CARD_001",
+            "product_name": "생활 할인 카드",
+            "product_type": "CARD",
+            "provider": "카드사",
+            "summary": "식비 할인 카드",
+            "target_group": "생활비 관리형",
+            "njob_trend_tip": "식비 절감",
+            "details": {
+                "discount_rate": 0.1,
+                "discount_categories": ["FOOD"],
+            },
+        },
+        {
+            "product_id": "SAVINGS_001",
+            "product_name": "자유적금 상품",
+            "product_type": "SAVINGS",
+            "provider": "은행",
+            "summary": "우대금리 적금 상품",
+            "target_group": "N잡러",
+            "njob_trend_tip": "부수입 적립",
+            "details": {"interest_rate": 4.2},
+        },
+    ]
+
+    result = service._select_best_product(
+        products=candidates,
+        request=request,
+        category_expenses=categories,
+        financial_type="저축 여력형",
+    )
+
+    assert result["product_id"] == "SAVINGS_001"
+
+
+def test_calculate_simulated_extra_income_applies_card_cap():
+    service = RecommendationService()
+
+    request = ProductRecommendationRequest(
+        user_id=1,
+        year_month="2026-07",
+        total_income=3_000_000,
+        total_expense=2_000_000,
+        available_funds=1_000_000,
+    )
+
+    categories = [
+        CategoryExpenseSummary(
+            category="FOOD",
+            displayName="식비",
+            amount=500000,
+            ratio=0.25,
+        )
+    ]
+
+    product = {
+        "product_id": "CARD_001",
+        "product_name": "생활 할인 카드",
+        "product_type": "CARD",
+        "provider": "카드사",
+        "summary": "식비 할인 카드",
+        "target_group": "생활비 관리형",
+        "njob_trend_tip": "식비 절감",
+        "details": {
+            "discount_rate": 0.1,
+            "discount_categories": ["FOOD"],
+            "maxMonthlyBenefit": 30000,
+        },
+    }
+
+    result = service._calculate_simulated_extra_income(
+        product=product,
+        request=request,
+        category_expenses=categories,
+    )
+
+    assert result == 30000
