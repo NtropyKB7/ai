@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException, status
 
 from app.rag.chroma_client import chroma_manager
-
 from app.schemas.llm import LLMTestRequest, LLMTestResponse
 from app.schemas.product import (
     ProductRecommendationRequest,
@@ -12,28 +11,25 @@ from app.schemas.transaction import (
     TransactionClassificationRequest,
     TransactionClassificationResponse,
 )
-
 from app.services.llm_service import llm_service
+from app.services.product_knowledge_pipeline_service import (
+    product_knowledge_pipeline_service,
+)
 from app.services.recommendation_service import recommendation_service
 from app.services.transaction_classification_service import (
     TransactionClassificationService,
 )
 
-
-# FastAPI 라우터 객체입니다.
 router = APIRouter()
 
-# 규칙 기반 소비 내역 분류 서비스 객체를 한 번 생성합니다.
-# 요청마다 새로 만들 필요 없이 재사용합니다.
 transaction_classification_service = TransactionClassificationService()
 
 
 @router.get("/health")
 def health_check():
     """
-    서버 구동 상태와 Chroma Vector DB 연결 상태를 확인합니다.
+    서버 상태와 ChromaDB 연결 상태를 반환합니다.
     """
-
     chroma_status = chroma_manager.heartbeat()
 
     return {
@@ -45,11 +41,9 @@ def health_check():
 @router.post("/api/v1/test-llm", response_model=LLMTestResponse)
 async def test_llm(request: LLMTestRequest):
     """
-    gpt-4o-mini 모델 연동 여부를 테스트하는 API입니다.
+    LLM 연동 테스트 API입니다.
     """
-
     result = await llm_service.generate_test(request.prompt)
-
     return LLMTestResponse(result=result)
 
 
@@ -60,22 +54,25 @@ async def test_llm(request: LLMTestRequest):
 @router.post("/api/v1/products/seed", status_code=status.HTTP_201_CREATED)
 def seed_products():
     """
-    seed_products.json의 금융상품 데이터를
-    Chroma Vector DB에 임베딩하여 저장합니다.
-    """
+    금융상품 지식 DB 갱신 파이프라인을 실행합니다.
 
+    현재는 seed_products.json을 원천 데이터로 사용합니다.
+    이후 외부 수집 경로가 추가되더라도 이 API는 동일한 파이프라인 진입점으로 유지할 수 있습니다.
+    """
     try:
-        count = chroma_manager.seed_financial_products()
+        result = product_knowledge_pipeline_service.refresh_from_seed_file()
 
         return {
-            "message": "금융상품 지식 DB 임베딩 적재 완료",
-            "seeded_count": count,
+            "message": "금융상품 지식 DB 갱신 완료",
+            "source_count": result["source_count"],
+            "normalized_count": result["normalized_count"],
+            "upserted_count": result["upserted_count"],
         }
 
     except Exception as error:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"지식 DB 적재 중 오류 발생: {str(error)}",
+            detail=f"지식 DB 갱신 중 오류 발생: {str(error)}",
         )
 
 
@@ -85,13 +82,10 @@ def seed_products():
 )
 async def recommend_product(request: ProductRecommendationRequest):
     """
-    재무 스냅샷을 기반으로 RAG 검색과 LLM 추론을 수행하여
-    금융상품 추천 및 코칭 리포트를 반환합니다.
+    월별 집계 데이터를 기반으로 금융상품 추천 결과를 생성합니다.
     """
-
     try:
         response = await recommendation_service.generate_recommendation(request)
-
         return response
 
     except Exception as error:
@@ -120,14 +114,8 @@ async def classify_transactions(
     request: TransactionClassificationRequest,
 ) -> TransactionClassificationResponse:
     """
-    거래 내역 여러 건을 일괄 분류하는 API입니다.
-
-    1. 모든 거래를 규칙 기반으로 분류합니다.
-    2. OTHER 또는 저신뢰도 거래만 LLM으로 보완합니다.
-    3. LLM 실패 시 규칙 기반 결과를 그대로 반환합니다.
+    거래 내역 여러 건을 일괄 분류합니다.
     """
-
-    # 규칙 분류와 LLM 보조 분류를 함께 수행합니다.
     results = await transaction_classification_service.classify_transactions_with_llm(
         request.transactions,
     )
