@@ -9,6 +9,7 @@ from app.schemas.transaction import (
     ExpenseCategory,
     ExpenseType,
     TransactionForClassification,
+    TransactionType,
 )
 
 # 테스트할 규칙 기반 분류 서비스를 가져옵니다.

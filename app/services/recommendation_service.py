@@ -1,111 +1,480 @@
 import json
+import logging
+from typing import Any
+
 from langchain_openai import ChatOpenAI
+
 from app.core.config import settings
-from app.schemas.product import (
-    FinancialProductSchema, 
-    ProductRecommendationRequest, 
-    ProductRecommendationResponse
-)
 from app.rag.chroma_client import chroma_manager
+from app.schemas.product import (
+    CategoryExpenseSummary,
+    FinancialProductSchema,
+    JobInsightInput,
+    ProductRecommendationRequest,
+    ProductRecommendationResponse,
+)
+
+logger = logging.getLogger(__name__)
+
 
 class RecommendationService:
     """
-    RAG 파이프라인(Retrieval -> Simulation -> Augment & Generation)을 통해
-    유저 맞춤형 금융상품 추천 및 N잡 코칭 리포트를 생성하는 핵심 서비스 클래스.
+    금융상품 추천과 AI 리포트 문구 생성을 담당합니다.
+
+    핵심 원칙:
+    - 원천 거래 전체를 LLM에 보내지 않습니다.
+    - 개인정보성 상세 데이터를 LLM에 보내지 않습니다.
+    - Java AI-service가 만든 월별 집계 데이터만 사용합니다.
+    - 추천 판단에 필요한 값은 Python 로직으로 먼저 정리합니다.
+    - LLM은 최종 문구 생성과 설명력 강화에 집중합니다.
     """
+
     def __init__(self):
-        # LangChain ChatOpenAI 기반 gpt-4o-mini 모델 초기화
-        # temperature를 0.2로 설정하여 환각(Hallucination)을 최소화하고 정교한 문구 유도
         self.llm = ChatOpenAI(
             model="gpt-4o-mini",
             openai_api_key=settings.OPENAI_API_KEY,
-            temperature=0.2
+            temperature=0.2,
         )
 
-    def _calculate_simulation_income(self, product: dict, request: ProductRecommendationRequest) -> int:
+    async def generate_recommendation(
+        self,
+        request: ProductRecommendationRequest,
+    ) -> ProductRecommendationResponse:
         """
-        [시뮬레이션 금액 연산 로직]
-        유저가 이 상품을 지출/적립에 활용했을 때 얻을 수 있었던 월 예상 이자 수익 또는 절감 금액을 계산합니다.
+        월별 소득·소비 집계 데이터를 기반으로 추천 상품과 리포트 인사이트를 생성합니다.
         """
-        p_type = product.get("product_type")
+
+        category_expenses = self._parse_category_expenses(request.category_expenses)
+        financial_type = self._classify_financial_type(request)
+
+        financial_activity_insight = self._build_financial_activity_insight(
+            request=request,
+            category_expenses=category_expenses,
+            financial_type=financial_type,
+        )
+
+        job_insight = self._build_job_insight(request.job_insight_inputs)
+
+        search_query = self._build_product_search_query(
+            request=request,
+            category_expenses=category_expenses,
+            financial_type=financial_type,
+        )
+
+        retrieved_product = chroma_manager.search_top_product(query_text=search_query)
+        product = FinancialProductSchema(**retrieved_product)
+
+        simulated_extra_income = self._calculate_simulated_extra_income(
+            product=retrieved_product,
+            request=request,
+            category_expenses=category_expenses,
+        )
+
+        llm_result = await self._generate_llm_insights(
+            request=request,
+            product=product,
+            simulated_extra_income=simulated_extra_income,
+            financial_type=financial_type,
+            financial_activity_insight=financial_activity_insight,
+            job_insight=job_insight,
+            category_expenses=category_expenses,
+        )
+
+        return ProductRecommendationResponse(
+            recommended_product=product,
+            simulated_extra_income=simulated_extra_income,
+            reasoning=llm_result.get(
+                "reasoning",
+                self._fallback_reasoning(product, simulated_extra_income),
+            ),
+            financial_activity_insight=llm_result.get(
+                "financial_activity_insight",
+                financial_activity_insight,
+            ),
+            financial_type=llm_result.get("financial_type", financial_type),
+            job_insight=llm_result.get("job_insight", job_insight),
+            future_income_trend=llm_result.get(
+                "future_income_trend",
+                self._fallback_future_income_trend(request),
+            ),
+        )
+
+    def _parse_category_expenses(
+        self,
+        category_expenses_text: str,
+    ) -> list[CategoryExpenseSummary]:
+        """
+        Java에서 전달한 category_expenses JSON 문자열을 파싱합니다.
+
+        현재 Java는 List 형태의 JSON 문자열을 전달합니다.
+        과거 Map 형태로 넘어오는 경우도 방어적으로 처리합니다.
+        """
+
+        if not category_expenses_text:
+            return []
+
+        try:
+            raw_value = json.loads(category_expenses_text)
+        except json.JSONDecodeError:
+            logger.warning("category_expenses JSON 파싱 실패: %s", category_expenses_text)
+            return []
+
+        if isinstance(raw_value, list):
+            return [
+                CategoryExpenseSummary(**item)
+                for item in raw_value
+                if isinstance(item, dict)
+            ]
+
+        if isinstance(raw_value, dict):
+            return [
+                CategoryExpenseSummary(
+                    category=category,
+                    amount=int(amount or 0),
+                    ratio=None,
+                )
+                for category, amount in raw_value.items()
+            ]
+
+        return []
+
+    def _classify_financial_type(
+        self,
+        request: ProductRecommendationRequest,
+    ) -> str:
+        """
+        사용자의 재무 유형을 설명 가능한 규칙으로 판정합니다.
+        """
+
+        total_income = request.total_income or 0
+        total_expense = request.total_expense or 0
+        available_funds = request.available_funds or 0
+
+        if total_income <= 0:
+            return "소득 데이터 부족형"
+
+        available_ratio = available_funds / total_income
+        expense_ratio = total_expense / total_income
+
+        if available_funds < 0:
+            return "현금흐름 위험형"
+
+        if available_ratio >= 0.3:
+            return "저축 여력형"
+
+        if available_ratio >= 0.1:
+            return "균형 관리형"
+
+        if expense_ratio >= 0.9:
+            return "소비 압박형"
+
+        return "가용자금 관리형"
+
+    def _build_financial_activity_insight(
+        self,
+        request: ProductRecommendationRequest,
+        category_expenses: list[CategoryExpenseSummary],
+        financial_type: str,
+    ) -> str:
+        """
+        소득·소비 데이터를 기반으로 재무활동 요약 문구를 생성합니다.
+        LLM 실패 시 fallback 문구로도 사용됩니다.
+        """
+
+        top_category = self._find_top_category(category_expenses)
+
+        if top_category:
+            top_category_text = (
+                f"가장 큰 소비 카테고리는 "
+                f"{top_category.displayName or top_category.category}"
+                f"({self._format_won(top_category.amount)})입니다."
+            )
+        else:
+            top_category_text = "카테고리별 소비 데이터는 아직 충분하지 않습니다."
+
+        return (
+            f"이번 달 총소득은 {self._format_won(request.total_income)}, "
+            f"총소비는 {self._format_won(request.total_expense)}, "
+            f"가용자금은 {self._format_won(request.available_funds)}입니다. "
+            f"현재 재무 유형은 {financial_type}이며, {top_category_text}"
+        )
+
+    def _build_job_insight(
+        self,
+        job_inputs: list[JobInsightInput],
+    ) -> str:
+        """
+        job_insight_inputs를 기반으로 잡 관련 인사이트를 생성합니다.
+        """
+
+        if not job_inputs:
+            return "잡별 소득·근무시간 데이터가 충분하지 않아 N잡 인사이트를 생성하기 어렵습니다."
+
+        primary_job = max(
+            job_inputs,
+            key=lambda job: job.incomeAmount or 0,
+        )
+
+        job_name = primary_job.jobName or "주요 잡"
+        income_amount = self._format_won(primary_job.incomeAmount or 0)
+        work_minutes = primary_job.totalWorkMinutes or 0
+        work_hours = round(work_minutes / 60, 1) if work_minutes else 0
+
+        fatigue_text = ""
+        if primary_job.averageFatigue is not None:
+            fatigue_text = f" 평균 피로도는 {primary_job.averageFatigue}입니다."
+
+        if work_hours > 0:
+            return (
+                f"{job_name}에서 가장 많은 소득이 발생했습니다. "
+                f"월 소득은 {income_amount}, 총 근무시간은 약 {work_hours}시간입니다."
+                f"{fatigue_text}"
+            )
+
+        return f"{job_name}에서 가장 많은 소득이 발생했습니다. 월 소득은 {income_amount}입니다.{fatigue_text}"
+
+    def _build_product_search_query(
+        self,
+        request: ProductRecommendationRequest,
+        category_expenses: list[CategoryExpenseSummary],
+        financial_type: str,
+    ) -> str:
+        """
+        ChromaDB 검색에 사용할 쿼리 문장을 만듭니다.
+
+        RAG는 최종 판단자가 아니라 후보 상품 검색기로 사용합니다.
+        """
+
+        top_category = self._find_top_category(category_expenses)
+
+        query_parts = [
+            f"재무유형: {financial_type}",
+            f"가용자금: {request.available_funds}원",
+            f"총소득: {request.total_income}원",
+            f"총소비: {request.total_expense}원",
+        ]
+
+        if top_category:
+            query_parts.append(f"주요 소비 카테고리: {top_category.category}")
+
+        if request.income_change_rate is not None:
+            query_parts.append(f"전월 대비 소득 증감률: {request.income_change_rate}")
+
+        if request.income_volatility is not None:
+            query_parts.append(f"소득 변동성: {request.income_volatility}")
+
+        return " | ".join(query_parts)
+
+    def _calculate_simulated_extra_income(
+        self,
+        product: dict[str, Any],
+        request: ProductRecommendationRequest,
+        category_expenses: list[CategoryExpenseSummary],
+    ) -> int:
+        """
+        추천 상품 사용 시 월 단위 예상 추가 수익 또는 절감액을 계산합니다.
+        """
+
+        product_type = product.get("product_type")
         details = product.get("details", {})
 
-        # 예·적금 상품인 경우: 가용 자금을 연 우대금리로 적립 시 1개월 예상 이자 수익 연산
-        if p_type == "SAVINGS":
-            interest_rate = details.get("interest_rate", 3.0) / 100 # 연 금리 (예: 4.5% -> 0.045)
-            available_funds = max(request.available_funds, 0)
-            # 월 이자 계산 (단리 기준): (가용자금 * 연금리) / 12개월
+        if product_type == "SAVINGS":
+            interest_rate = float(details.get("interest_rate", 3.0)) / 100
+            available_funds = max(request.available_funds or 0, 0)
             return int((available_funds * interest_rate) / 12)
 
-        # 카드 상품인 경우: 당월 주유/이동 지출액 대비 할인율 적용 절감액 연산
-        elif p_type == "CARD":
-            discount_rate = details.get("discount_rate", 0.10) # 카드 할인율 (예: 10% -> 0.1)
-            fuel_expense = request.monthly_fuel_expense or 300000 # 지출 미입력 시 기본값 30만원 적용
-            return int(fuel_expense * discount_rate)
+        if product_type == "CARD":
+            discount_rate = float(details.get("discount_rate", 0.1))
+            top_category = self._find_top_category(category_expenses)
+
+            base_expense = top_category.amount if top_category else request.total_expense
+            return int(max(base_expense or 0, 0) * discount_rate)
 
         return 0
 
-    async def generate_recommendation(self, request: ProductRecommendationRequest) -> ProductRecommendationResponse:
+    async def _generate_llm_insights(
+        self,
+        request: ProductRecommendationRequest,
+        product: FinancialProductSchema,
+        simulated_extra_income: int,
+        financial_type: str,
+        financial_activity_insight: str,
+        job_insight: str,
+        category_expenses: list[CategoryExpenseSummary],
+    ) -> dict[str, str]:
         """
-        RAG 파이프라인 3단계를 수행하여 최종 AI 코칭 추천 응답 객체를 반환하는 비동기 메서드.
+        LLM을 호출해 최종 리포트 문구를 생성합니다.
+        LLM에는 집계 데이터와 요약된 판단 결과만 전달합니다.
         """
-        # =========================================================================
-        # [1단계: Retrieval (지식 검색)]
-        # 유저의 소비 패턴 요약문(consumption_summary)을 Vector DB 쿼리로 날려 최적 상품 1개 검색
-        # =========================================================================
-        retrieved_dict = chroma_manager.search_top_product(query_text=request.consumption_summary)
-        product_dto = FinancialProductSchema(**retrieved_dict)
 
-        # =========================================================================
-        # [2단계: Simulation (수익/절감액 산출)]
-        # 유저의 가용 자금/주유 지출액 데이터를 바탕으로 미사용 시 손실/사용 시 이득 시뮬레이션 계산
-        # =========================================================================
-        extra_income = self._calculate_simulation_income(retrieved_dict, request)
+        category_summary = [
+            {
+                "category": item.category,
+                "displayName": item.displayName,
+                "amount": item.amount,
+                "ratio": item.ratio,
+            }
+            for item in category_expenses
+        ]
 
-        # =========================================================================
-        # [3단계: Augment & Generation (지식 주입 및 LLM 추론)]
-        # 검색된 지식 + 시뮬레이션 결과 수치를 Prompt Context로 주입하여 정밀한 문구 작성
-        # =========================================================================
+        job_summary = [
+            {
+                "jobId": item.jobId,
+                "jobName": item.jobName,
+                "incomeAmount": item.incomeAmount,
+                "incomeRatio": item.incomeRatio,
+                "totalWorkMinutes": item.totalWorkMinutes,
+                "workDays": item.workDays,
+                "averageFatigue": item.averageFatigue,
+                "latestFatigue": item.latestFatigue,
+            }
+            for item in request.job_insight_inputs
+        ]
+
         prompt = f"""
-        당신은 N잡러 전문 금융 파이낸셜 코치입니다. 
-        아래 제공된 [유저 재무 스냅샷]과 RAG 지식 DB에서 검증하여 끌어온 [추천 금융상품 지식]만을 기반으로 유저 맞춤형 코칭 리포트 문구를 작성하세요.
+당신은 N잡러를 위한 금융상품 추천 및 월간 재무 리포트 작성 전문가입니다.
 
-        [유저 재무 스냅샷]
-        - 당월 가용 자금: {request.available_funds:,}원
-        - 주유/이동 지출액: {request.monthly_fuel_expense:,}원
-        - 소비 패턴 요약: {request.consumption_summary}
+아래 데이터는 원천 거래가 아니라 월별 집계 데이터입니다.
+개인정보나 원천 거래 상세는 포함되어 있지 않습니다.
 
-        [추천 금융상품 지식 (RAG 검색 및 시뮬레이션 결과)]
-        - 상품명: {product_dto.product_name} ({product_dto.provider})
-        - 상품 유형: {product_dto.product_type}
-        - 핵심 혜택 요약: {product_dto.summary}
-        - N잡 활용 팁: {product_dto.njob_trend_tip}
-        - 월 시뮬레이션 추가 수익/절감액: {extra_income:,}원
+[사용자 월간 재무 집계]
+- 기준 연월: {request.year_month}
+- 총소득: {request.total_income}원
+- 총소비: {request.total_expense}원
+- 가용자금: {request.available_funds}원
+- 전월 대비 소득 증감액: {request.income_change_amount}
+- 전월 대비 소득 증감률: {request.income_change_rate}
+- 소득 변동성: {request.income_volatility}
+- 카테고리별 소비: {json.dumps(category_summary, ensure_ascii=False)}
+- 잡별 인사이트 입력: {json.dumps(job_summary, ensure_ascii=False)}
 
-        [작성 지침]
-        1. `reasoning`: "지난달 이 상품을 사용하셨다면 약 {extra_income:,}원의 추가 이자/지출 절감 효과를 보실 수 있었습니다" 맥락을 반드시 포함하여 직관적인 추천 사유 2~3문장 작성.
-        2. `future_income_trend`: 유저의 소비/부업 특성과 이 상품을 결합하여 향후 N잡 수익성을 높일 수 있는 코칭 문구 2문장 작성.
+[사전 계산된 판단]
+- 재무 유형: {financial_type}
+- 재무활동 요약: {financial_activity_insight}
+- 잡 관련 요약: {job_insight}
 
-        반드시 아래 지정된 JSON 형식으로만 응답을 출력하세요:
-        {{
-            "reasoning": "...",
-            "future_income_trend": "..."
-        }}
+[추천 금융상품]
+- 상품명: {product.product_name}
+- 제공사: {product.provider}
+- 상품 유형: {product.product_type}
+- 상품 요약: {product.summary}
+- N잡 활용 팁: {product.njob_trend_tip}
+- 예상 추가 수익 또는 절감액: {simulated_extra_income}원
+
+[작성 규칙]
+1. reasoning은 추천 상품을 쓰면 어떤 이득이 있는지 직관적으로 설명하세요.
+2. financial_activity_insight는 소비와 소득 흐름을 자연스럽게 요약하세요.
+3. financial_type은 주어진 재무 유형을 유지하되, 더 적절한 표현으로 다듬어도 됩니다.
+4. job_insight는 잡별 소득, 근무시간, 피로도 관점의 조언으로 작성하세요.
+5. future_income_trend는 다음 달 소득 흐름과 N잡 코칭 문구로 작성하세요.
+6. 과장된 수익 보장 표현은 쓰지 마세요.
+7. 반드시 JSON 객체만 반환하세요.
+
+[응답 형식]
+{{
+  "reasoning": "...",
+  "financial_activity_insight": "...",
+  "financial_type": "...",
+  "job_insight": "...",
+  "future_income_trend": "..."
+}}
+"""
+
+        try:
+            response = await self.llm.ainvoke(prompt)
+            return self._parse_llm_json(response.content)
+
+        except Exception as error:
+            logger.error("추천 LLM 문구 생성 실패: %s", str(error), exc_info=True)
+            return {}
+
+    def _parse_llm_json(
+        self,
+        content: str,
+    ) -> dict[str, str]:
+        """
+        LLM 응답을 JSON으로 파싱합니다.
+        실패하면 빈 dict를 반환하고 fallback 문구를 사용합니다.
         """
 
-        # 비동기로 LLM 호출하여 응답 수신
-        response = await self.llm.ainvoke(prompt)
-        
-        # LLM 응답 텍스트 파싱 (마크다운 ```json 태그 제거 후 JSON 객체 변환)
-        parsed_res = json.loads(response.content.strip().replace("```json", "").replace("```", ""))
+        if not content:
+            return {}
 
-        # Pydantic 응답 DTO로 포장하여 반환
-        return ProductRecommendationResponse(
-            recommended_product=product_dto,
-            simulated_extra_income=extra_income,
-            reasoning=parsed_res["reasoning"],
-            future_income_trend=parsed_res["future_income_trend"]
+        cleaned = content.strip()
+        cleaned = cleaned.replace("```json", "")
+        cleaned = cleaned.replace("```", "")
+        cleaned = cleaned.strip()
+
+        try:
+            parsed = json.loads(cleaned)
+        except json.JSONDecodeError:
+            logger.warning("LLM JSON 파싱 실패: %s", content)
+            return {}
+
+        if not isinstance(parsed, dict):
+            return {}
+
+        return {
+            key: str(value)
+            for key, value in parsed.items()
+            if value is not None
+        }
+
+    def _find_top_category(
+        self,
+        category_expenses: list[CategoryExpenseSummary],
+    ) -> CategoryExpenseSummary | None:
+        """
+        소비 금액이 가장 큰 카테고리를 찾습니다.
+        """
+
+        if not category_expenses:
+            return None
+
+        return max(category_expenses, key=lambda item: item.amount or 0)
+
+    def _fallback_reasoning(
+        self,
+        product: FinancialProductSchema,
+        simulated_extra_income: int,
+    ) -> str:
+        """
+        LLM 실패 시 사용할 추천 사유 기본 문구입니다.
+        """
+
+        return (
+            f"{product.product_name}은 현재 소비·소득 흐름에 맞춰 활용할 수 있는 상품입니다. "
+            f"예상 추가 수익 또는 절감액은 약 {self._format_won(simulated_extra_income)}입니다."
         )
 
-# 전역에서 재사용할 추천 서비스 싱글톤 인스턴스 생성
+    def _fallback_future_income_trend(
+        self,
+        request: ProductRecommendationRequest,
+    ) -> str:
+        """
+        LLM 실패 시 사용할 미래 소득 트렌드 기본 문구입니다.
+        """
+
+        if request.income_change_rate is None:
+            return "소득 변화 데이터가 충분하지 않아 다음 달 흐름은 추가 관찰이 필요합니다."
+
+        if request.income_change_rate > 0:
+            return "최근 소득이 증가하는 흐름이므로, 가용자금을 저축이나 혜택형 상품에 나누어 활용할 여지가 있습니다."
+
+        if request.income_change_rate < 0:
+            return "최근 소득이 감소하는 흐름이므로, 소비 조정과 현금흐름 안정이 우선입니다."
+
+        return "최근 소득은 큰 변동 없이 유지되고 있어 안정적인 관리가 가능합니다."
+
+    def _format_won(
+        self,
+        amount: int | None,
+    ) -> str:
+        """
+        원 단위 금액을 읽기 쉬운 문자열로 변환합니다.
+        """
+
+        return f"{amount or 0:,}원"
+
+
 recommendation_service = RecommendationService()
