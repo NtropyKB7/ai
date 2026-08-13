@@ -1,101 +1,119 @@
-from datetime import datetime
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, Field
 
+from pydantic import BaseModel, Field, model_validator
 
-# ==========================================
-# Enums
-# ==========================================
 
 class ExpenseCategory(str, Enum):
-    """
-    소비 거래의 지출 카테고리입니다.
+    """Spring Enum 및 TXN_ANALYSIS.category와 매핑되는 소비 카테고리."""
 
-    Spring Java Enum 및 TXN_ANALYSIS.category와 1:1 매핑되는 표준 코드입니다.
-    """
-    FOOD = "FOOD"                    # 식비
-    TRANSPORTATION = "TRANSPORTATION"# 교통·주유
-    HOUSING = "HOUSING"              # 주거
-    COMMUNICATION = "COMMUNICATION"  # 통신
-    MEDICAL = "MEDICAL"              # 의료·건강
-    EDUCATION = "EDUCATION"          # 교육
-    SHOPPING = "SHOPPING"            # 쇼핑
-    LEISURE = "LEISURE"              # 취미·여가
-    INSURANCE = "INSURANCE"          # 보험
-    FINANCE = "FINANCE"              # 대출 이자 등 금융 지출
-    ETC = "ETC"                      # 카드대금 등 기타 소비
+    FOOD = "FOOD"
+    TRANSPORTATION = "TRANSPORTATION"
+    HOUSING = "HOUSING"
+    COMMUNICATION = "COMMUNICATION"
+    MEDICAL = "MEDICAL"
+    EDUCATION = "EDUCATION"
+    SHOPPING = "SHOPPING"
+    LEISURE = "LEISURE"
+    INSURANCE = "INSURANCE"
+    FINANCE = "FINANCE"
+    ETC = "ETC"
 
 
 class ExpenseType(str, Enum):
-    """
-    소비 지출의 반복성 유형입니다.
+    """소비 지출의 반복성 유형."""
 
-    FIXED: 매월 또는 일정 주기로 반복되는 고정성 지출
-    VARIABLE: 소비 패턴에 따라 금액과 횟수가 달라지는 지출
-    """
     FIXED = "FIXED"
     VARIABLE = "VARIABLE"
 
 
-# ==========================================
-# Request DTOs
-# ==========================================
+class TransactionCategory(str, Enum):
+    """ACCOUNT_TRANSACTION.transaction_category 표준 코드."""
+
+    ORDINARY = "ORDINARY"
+    INSTALLMENT = "INSTALLMENT"
+    LOAN = "LOAN"
+
 
 class TransactionForClassification(BaseModel):
-    """
-    Spring AI-service가 FastAPI에 전달하는 거래 내역 1건의 형식입니다.
-    (출금 거래만 전달됩니다.)
-    """
+    """Spring AI-service가 FastAPI에 전달하는 거래 한 건."""
 
     transactionId: int = Field(
         ...,
+        gt=0,
         description="ACCOUNT_TRANSACTION의 거래 ID",
-    )
-
-    transactionDate: datetime = Field(
-        ...,
-        description="거래 일시 (ISO 8601 문자열)",
     )
 
     amount: int = Field(
         ...,
-        ge=0,
-        description="거래 금액(원 단위)",
+        gt=0,
+        description="분류 대상 거래 금액(원 단위)",
     )
 
-    merchantName: Optional[str] = Field(
-        default=None,
-        description="거래처명 / 가맹점명, 없으면 null 또는 빈 문자열",
-    )
-
-    description: str = Field(
+    transactionCategory: TransactionCategory = Field(
         ...,
-        description="거래 상세 설명 / 적요 조합 문자열",
+        description="ACCOUNT_TRANSACTION 거래 유형",
+    )
+
+    organizationCode: str = Field(
+        ...,
+        min_length=1,
+        max_length=10,
+        description="은행별 거래 설명 필드 해석에 사용하는 CODEF 기관코드",
+    )
+
+    desc1: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        description="CODEF resAccountDesc1 원문",
+    )
+
+    desc2: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        description="CODEF resAccountDesc2 원문",
+    )
+
+    desc3: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        description="CODEF resAccountDesc3 원문. 주로 상대방·가맹점·상품명",
+    )
+
+    desc4: Optional[str] = Field(
+        default=None,
+        max_length=255,
+        description="CODEF resAccountDesc4 원문",
     )
 
 
 class TransactionClassificationRequest(BaseModel):
-    """
-    여러 거래 내역을 한 번에 분류하기 위한 FastAPI 요청 DTO입니다.
-    """
+    """여러 거래를 한 번에 분류하는 요청 DTO."""
 
     transactions: list[TransactionForClassification] = Field(
         ...,
         min_length=1,
-        max_length=1000,
-        description="분류할 거래 내역 목록",
+        max_length=100,
+        description="분류할 거래 목록",
     )
 
+    @model_validator(mode="after")
+    def validate_unique_transaction_ids(self):
+        transaction_ids = [
+            transaction.transactionId
+            for transaction in self.transactions
+        ]
 
-# ==========================================
-# Response DTOs
-# ==========================================
+        if len(transaction_ids) != len(set(transaction_ids)):
+            raise ValueError(
+                "transactionId must be unique within a request"
+            )
+
+        return self
+
 
 class TransactionClassificationResult(BaseModel):
-    """
-    거래 내역 1건에 대한 FastAPI 분류 결과 DTO입니다.
-    """
+    """거래 한 건의 소비 분류 결과."""
 
     transactionId: int = Field(
         ...,
@@ -104,35 +122,31 @@ class TransactionClassificationResult(BaseModel):
 
     isConsumption: bool = Field(
         ...,
-        description="소비 거래 여부 (True: 소비, False: 비소비)",
+        description="소비 거래 여부",
     )
 
     category: Optional[ExpenseCategory] = Field(
         default=None,
-        description="소비 카테고리, 비소비 거래면 null",
+        description="소비 카테고리. 비소비 거래는 null",
     )
 
     expenseType: Optional[ExpenseType] = Field(
         default=None,
-        description="FIXED 또는 VARIABLE, 비소비 거래면 null",
+        description="지출 유형. 비소비 거래는 null",
     )
 
 
 class TransactionClassificationData(BaseModel):
-    """
-    공통 API 응답의 data 내부에 들어갈 실제 분류 결과 목록입니다.
-    """
+    """공통 응답의 data 필드."""
 
     results: list[TransactionClassificationResult] = Field(
         ...,
-        description="거래별 분류 결과 목록",
+        description="거래별 분류 결과",
     )
 
 
 class TransactionClassificationResponse(BaseModel):
-    """
-    소비 내역 일괄 분류 API의 최종 성공 응답 DTO입니다. (팀 공통 응답 형식)
-    """
+    """소비 거래 일괄 분류 API 응답 DTO."""
 
     success: bool = Field(
         ...,
@@ -151,16 +165,14 @@ class TransactionClassificationResponse(BaseModel):
 
     data: TransactionClassificationData = Field(
         ...,
-        description="소비 내역 분류 결과 데이터",
+        description="소비 거래 분류 결과 데이터",
     )
 
 
 class LLMTransactionClassificationResponse(BaseModel):
-    """
-    LLM이 보조 분류 시 내부적으로 반환받는 JSON 형식입니다.
-    """
+    """LLM 보조 분류 응답 형식."""
 
     results: list[TransactionClassificationResult] = Field(
         ...,
-        description="LLM이 보조 분류한 거래 결과 목록",
+        description="LLM 보조 분류 결과",
     )
