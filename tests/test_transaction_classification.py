@@ -1,11 +1,14 @@
-from datetime import datetime
-from unittest.mock import MagicMock
+from unittest.mock import Mock
+
 import pytest
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
+from app.main import app
 from app.schemas.transaction import (
     ExpenseCategory,
     ExpenseType,
+    TransactionCategory,
     TransactionClassificationRequest,
     TransactionClassificationResult,
     TransactionForClassification,
@@ -14,202 +17,449 @@ from app.services.transaction_classification_service import (
     TransactionClassificationService,
 )
 
-
-# =========================================================================
-# Fixtures
-# =========================================================================
-
-@pytest.fixture
-def mock_llm_service():
-    """LLM 외부 API 호출을 차단하기 위한 Mock Fixture"""
-    service = MagicMock()
-    service.classify_with_llm.return_value = []
-    return service
+client = TestClient(app)
 
 
-@pytest.fixture
-def classification_service(mock_llm_service):
-    """테스트 대상 분류 서비스 인스턴스 Fixture"""
-    return TransactionClassificationService(llm_service=mock_llm_service)
-
-
-def create_txn(
-    txn_id: int, description: str, merchant_name: str = "", amount: int = 10000
+def create_transaction(
+    transaction_id: int = 1,
+    amount: int = 10_000,
+    organization_code: str = "0004",
+    desc1: str | None = None,
+    desc2: str | None = None,
+    desc3: str | None = None,
+    desc4: str | None = None,
 ) -> TransactionForClassification:
-    """테스트용 거래 객체 생성 헬퍼 함수"""
     return TransactionForClassification(
-        transactionId=txn_id,
-        transactionDate=datetime.now(),
+        transactionId=transaction_id,
         amount=amount,
-        merchantName=merchant_name,
-        description=description,
+        transactionCategory=TransactionCategory.ORDINARY,
+        organizationCode=organization_code,
+        desc1=desc1,
+        desc2=desc2,
+        desc3=desc3,
+        desc4=desc4,
     )
 
 
-# =========================================================================
-# 1. DTO 검증 테스트
-# =========================================================================
-
-def test_transaction_for_classification_valid():
-    """정상적인 DTO 생성 검증"""
-    txn = TransactionForClassification(
-        transactionId=1,
-        transactionDate=datetime(2026, 8, 7, 12, 0, 0),
-        amount=15000,
-        merchantName="스타벅스 강남점",
-        description="스타벅스",
+def test_request_accepts_structured_transaction_fields():
+    request = TransactionClassificationRequest(
+        transactions=[
+            create_transaction(
+                transaction_id=101,
+                amount=65_000,
+                organization_code="0004",
+                desc2="FBS출금",
+                desc3="KT통신요금",
+                desc4="강남지점",
+            )
+        ]
     )
-    assert txn.transactionId == 1
-    assert txn.amount == 15000
-    assert txn.merchantName == "스타벅스 강남점"
+
+    transaction = request.transactions[0]
+
+    assert transaction.transactionId == 101
+    assert transaction.amount == 65_000
+    assert transaction.transactionCategory == TransactionCategory.ORDINARY
+    assert transaction.organizationCode == "0004"
+    assert transaction.desc1 is None
+    assert transaction.desc2 == "FBS출금"
+    assert transaction.desc3 == "KT통신요금"
+    assert transaction.desc4 == "강남지점"
 
 
-def test_transaction_for_classification_negative_amount():
-    """음수 금액 입력 시 Pydantic ValidationError 발생 검증"""
+def test_request_rejects_zero_or_negative_amount():
     with pytest.raises(ValidationError):
-        TransactionForClassification(
-            transactionId=1,
-            transactionDate=datetime.now(),
-            amount=-5000,  # ge=0 검증 위반
-            description="잘못된 금액",
+        create_transaction(amount=0)
+
+    with pytest.raises(ValidationError):
+        create_transaction(amount=-1)
+
+
+def test_request_rejects_non_positive_transaction_id():
+    with pytest.raises(ValidationError):
+        create_transaction(transaction_id=0)
+
+
+def test_request_rejects_more_than_100_transactions():
+    transactions = [
+        create_transaction(transaction_id=index)
+        for index in range(1, 102)
+    ]
+
+    with pytest.raises(ValidationError):
+        TransactionClassificationRequest(transactions=transactions)
+
+
+def test_request_rejects_duplicate_transaction_ids():
+    with pytest.raises(
+        ValidationError,
+        match="transactionId must be unique",
+    ):
+        TransactionClassificationRequest(
+            transactions=[
+                create_transaction(transaction_id=1),
+                create_transaction(transaction_id=1),
+            ]
         )
 
 
-# =========================================================================
-# 2. 비소비 거래 규칙 테스트
-# =========================================================================
+def test_all_description_fields_may_be_null():
+    transaction = create_transaction(
+        desc1=None,
+        desc2=None,
+        desc3=None,
+        desc4=None,
+    )
+
+    assert transaction.desc1 is None
+    assert transaction.desc2 is None
+    assert transaction.desc3 is None
+    assert transaction.desc4 is None
+
 
 @pytest.mark.parametrize(
-    "description, merchant",
+    ("desc3", "expected_category", "expected_expense_type"),
     [
-        ("청약저축 납입", "KB국민은행"),
-        ("대출원금 상환", "신한은행"),
-        ("내계좌 이체", "홍길동"),
-        ("ATM 현금인출", "하나은행 ATM"),
-        ("주식 매수", "키움증권"),
+        ("스타벅스 강남점", ExpenseCategory.FOOD, ExpenseType.VARIABLE),
+        (
+            "카카오T 택시",
+            ExpenseCategory.TRANSPORTATION,
+            ExpenseType.VARIABLE,
+        ),
+        ("한국전력", ExpenseCategory.HOUSING, ExpenseType.FIXED),
+        ("KT통신요금", ExpenseCategory.COMMUNICATION, ExpenseType.FIXED),
+        ("서울대학교병원", ExpenseCategory.MEDICAL, ExpenseType.VARIABLE),
+        ("패스트캠퍼스 수강료", ExpenseCategory.EDUCATION, ExpenseType.FIXED),
+        ("신세계백화점", ExpenseCategory.SHOPPING, ExpenseType.VARIABLE),
+        ("넷플릭스", ExpenseCategory.LEISURE, ExpenseType.VARIABLE),
     ],
 )
-def test_rule_non_consumption_transactions(classification_service, description, merchant):
-    """적금, 대출원금, 계좌이체, 현금인출 등 비소비 거래 판별 테스트"""
-    txn = create_txn(1, description=description, merchant_name=merchant)
-    results = classification_service.classify_transactions([txn])
-
-    assert len(results) == 1
-    res = results[0]
-    assert res.transactionId == 1
-    assert res.isConsumption is False
-    assert res.category is None
-    assert res.expenseType is None
-
-
-# =========================================================================
-# 3. 금융 예외 소비 거래 규칙 테스트
-# =========================================================================
-
-def test_rule_financial_exception_loan_interest(classification_service):
-    """대출 이자: 소비 / FINANCE / FIXED 검증"""
-    txn = create_txn(1, description="주택담보대출이자 납입", merchant_name="우리은행")
-    res = classification_service.classify_transactions([txn])[0]
-
-    assert res.isConsumption is True
-    assert res.category == ExpenseCategory.FINANCE
-    assert res.expenseType == ExpenseType.FIXED
-
-
-def test_rule_financial_exception_insurance(classification_service):
-    """보험료: 소비 / INSURANCE / FIXED 검증"""
-    txn = create_txn(1, description="실손보험료 출금", merchant_name="삼성화재")
-    res = classification_service.classify_transactions([txn])[0]
-
-    assert res.isConsumption is True
-    assert res.category == ExpenseCategory.INSURANCE
-    assert res.expenseType == ExpenseType.FIXED
-
-
-def test_rule_financial_exception_card_bill(classification_service):
-    """카드대금: 소비 / ETC / VARIABLE (MVP 예외) 검증"""
-    txn = create_txn(1, description="8월 카드대금 결제", merchant_name="현대카드")
-    res = classification_service.classify_transactions([txn])[0]
-
-    assert res.isConsumption is True
-    assert res.category == ExpenseCategory.ETC
-    assert res.expenseType == ExpenseType.VARIABLE
-
-
-# =========================================================================
-# 4. 주요 카테고리 패턴 매칭 테스트
-# =========================================================================
-
-@pytest.mark.parametrize(
-    "description, merchant, expected_category, expected_type",
-    [
-        ("배달의민족 결제", "", ExpenseCategory.FOOD, ExpenseType.VARIABLE),
-        ("스타벅스 아메리카노", "스타벅스", ExpenseCategory.FOOD, ExpenseType.VARIABLE),
-        ("카카오T 택시", "카카오모빌리티", ExpenseCategory.TRANSPORTATION, ExpenseType.VARIABLE),
-        ("KTX 승차권 예매", "코레일", ExpenseCategory.TRANSPORTATION, ExpenseType.VARIABLE),
-        ("아파트 관리비 납부", "아파트아이", ExpenseCategory.HOUSING, ExpenseType.FIXED),
-        ("SKT 통신요금 자동이체", "SK텔레콤", ExpenseCategory.COMMUNICATION, ExpenseType.FIXED),
-        ("약국 약제비", "온누리약국", ExpenseCategory.MEDICAL, ExpenseType.VARIABLE),
-        ("인프런 강의 결제", "인프런", ExpenseCategory.EDUCATION, ExpenseType.FIXED),
-        ("쿠팡 로켓배송", "쿠팡", ExpenseCategory.SHOPPING, ExpenseType.VARIABLE),
-        ("CGV 영화 예매", "CGV", ExpenseCategory.LEISURE, ExpenseType.VARIABLE),
-    ],
-)
-def test_rule_category_patterns(
-    classification_service, description, merchant, expected_category, expected_type
+def test_rule_based_category_classification(
+    desc3,
+    expected_category,
+    expected_expense_type,
 ):
-    """일반 소비 카테고리 정규식 키워드 분류 검증"""
-    txn = create_txn(1, description=description, merchant_name=merchant)
-    res = classification_service.classify_transactions([txn])[0]
+    service = TransactionClassificationService()
 
-    assert res.isConsumption is True
-    assert res.category == expected_category
-    assert res.expenseType == expected_type
+    result = service.classify_transactions(
+        [create_transaction(desc3=desc3)]
+    )[0]
+
+    assert result.isConsumption is True
+    assert result.category == expected_category
+    assert result.expenseType == expected_expense_type
 
 
-# =========================================================================
-# 5. 미분류 건 LLM 이관 및 1:1 보장 Fallback 테스트
-# =========================================================================
+def test_desc3_is_used_as_primary_merchant_field():
+    service = TransactionClassificationService()
 
-def test_unclassified_transaction_transfers_to_llm(classification_service, mock_llm_service):
-    """규칙에 걸리지 않는 미분류 거래는 LLM 서비스로 넘어가는지 검증"""
-    txn = create_txn(99, description="알 수 없는 상점 123", merchant_name="기타상점")
+    result = service.classify_transactions(
+        [
+            create_transaction(
+                desc2="FBS출금",
+                desc3="KT통신요금",
+                desc4="강남지점",
+            )
+        ]
+    )[0]
 
-    # LLM Mock 응답 설정
-    mock_llm_service.classify_with_llm.return_value = [
+    assert result.isConsumption is True
+    assert result.category == ExpenseCategory.COMMUNICATION
+    assert result.expenseType == ExpenseType.FIXED
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "정기적금",
+        "자유적금",
+        "적금납입",
+        "정기예금",
+        "대출상환",
+        "원금상환",
+        "대출계좌",
+        "본인계좌",
+    ],
+)
+def test_explicit_financial_account_transfer_is_non_consumption(
+    description,
+):
+    service = TransactionClassificationService()
+
+    result = service.classify_transactions(
+        [create_transaction(desc3=description)]
+    )[0]
+
+    assert result.isConsumption is False
+    assert result.category is None
+    assert result.expenseType is None
+
+
+@pytest.mark.parametrize(
+    "transaction_channel",
+    [
+        "자동이체",
+        "타행이체",
+        "전자금융",
+        "CMS",
+        "FBS출금",
+        "인터넷뱅킹",
+    ],
+)
+def test_generic_transaction_channel_alone_is_not_non_consumption(
+    transaction_channel,
+):
+    service = TransactionClassificationService()
+
+    result = service.classify_transactions(
+        [create_transaction(desc2=transaction_channel)]
+    )[0]
+
+    assert result.isConsumption is True
+    assert result.category == ExpenseCategory.ETC
+    assert result.expenseType == ExpenseType.VARIABLE
+
+
+def test_insurance_is_fixed_consumption():
+    service = TransactionClassificationService()
+
+    result = service.classify_transactions(
+        [
+            create_transaction(
+                desc2="자동이체",
+                desc3="삼성생명 실손보험",
+            )
+        ]
+    )[0]
+
+    assert result.isConsumption is True
+    assert result.category == ExpenseCategory.INSURANCE
+    assert result.expenseType == ExpenseType.FIXED
+
+
+def test_loan_interest_is_fixed_finance_consumption():
+    service = TransactionClassificationService()
+
+    result = service.classify_transactions(
+        [create_transaction(desc3="대출이자 납입")]
+    )[0]
+
+    assert result.isConsumption is True
+    assert result.category == ExpenseCategory.FINANCE
+    assert result.expenseType == ExpenseType.FIXED
+
+
+def test_card_bill_is_variable_etc_consumption():
+    service = TransactionClassificationService()
+
+    result = service.classify_transactions(
+        [create_transaction(desc3="신용카드이용대금")]
+    )[0]
+
+    assert result.isConsumption is True
+    assert result.category == ExpenseCategory.ETC
+    assert result.expenseType == ExpenseType.VARIABLE
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "ATM출금",
+        "스마트출금",
+        "현금인출",
+        "CD출금",
+    ],
+)
+def test_cash_withdrawal_is_variable_etc_consumption(description):
+    service = TransactionClassificationService()
+
+    result = service.classify_transactions(
+        [create_transaction(desc2=description)]
+    )[0]
+
+    assert result.isConsumption is True
+    assert result.category == ExpenseCategory.ETC
+    assert result.expenseType == ExpenseType.VARIABLE
+
+
+def test_one_time_financial_fee_is_variable_finance():
+    service = TransactionClassificationService()
+
+    result = service.classify_transactions(
+        [create_transaction(desc3="해외결제수수료")]
+    )[0]
+
+    assert result.isConsumption is True
+    assert result.category == ExpenseCategory.FINANCE
+    assert result.expenseType == ExpenseType.VARIABLE
+
+
+def test_check_card_marker_does_not_hide_merchant_classification():
+    service = TransactionClassificationService()
+
+    result = service.classify_transactions(
+        [
+            create_transaction(
+                desc2="NHBC체크",
+                desc3="스타벅스",
+            )
+        ]
+    )[0]
+
+    assert result.isConsumption is True
+    assert result.category == ExpenseCategory.FOOD
+    assert result.expenseType == ExpenseType.VARIABLE
+
+
+def test_unclassified_transaction_is_sent_to_llm():
+    llm_service = Mock()
+    llm_service.classify_with_llm.return_value = [
         TransactionClassificationResult(
-            transactionId=99,
+            transactionId=1,
             isConsumption=True,
-            category=ExpenseCategory.ETC,
+            category=ExpenseCategory.SHOPPING,
             expenseType=ExpenseType.VARIABLE,
         )
     ]
 
-    results = classification_service.classify_transactions([txn])
+    service = TransactionClassificationService(llm_service=llm_service)
+    transaction = create_transaction(desc3="알 수 없는 가맹점")
 
-    mock_llm_service.classify_with_llm.assert_called_once()
-    assert len(results) == 1
-    assert results[0].transactionId == 99
+    result = service.classify_transactions([transaction])[0]
+
+    llm_service.classify_with_llm.assert_called_once_with([transaction])
+    assert result.category == ExpenseCategory.SHOPPING
 
 
-def test_1_to_1_mapping_fallback_guarantee(classification_service, mock_llm_service):
-    """LLM 장애나 미응답 시에도 모든 입력 transactionId에 대한 기본 결과(Fallback) 생성 보장 검증"""
-    txns = [
-        create_txn(1, description="스타벅스"),  # 규칙 성공
-        create_txn(2, description="알수없는 거래"),  # 규칙 실패 -> LLM 누락 발생 가정
+def test_rule_result_is_not_overridden_by_llm():
+    llm_service = Mock()
+    llm_service.classify_with_llm.return_value = [
+        TransactionClassificationResult(
+            transactionId=1,
+            isConsumption=True,
+            category=ExpenseCategory.SHOPPING,
+            expenseType=ExpenseType.VARIABLE,
+        )
     ]
 
-    # LLM이 거래 2를 누락하고 빈 결과를 반환했다고 가정
-    mock_llm_service.classify_with_llm.return_value = []
+    service = TransactionClassificationService(llm_service=llm_service)
 
-    results = classification_service.classify_transactions(txns)
+    result = service.classify_transactions(
+        [create_transaction(desc3="스타벅스")]
+    )[0]
 
-    assert len(results) == 2
-    res_map = {r.transactionId: r for r in results}
+    llm_service.classify_with_llm.assert_not_called()
+    assert result.category == ExpenseCategory.FOOD
 
-    assert 1 in res_map
-    assert 2 in res_map
-    # 누락된 거래 2번은 Fallback 기본값(소비/ETC/VARIABLE)으로 채워져야 함
-    assert res_map[2].isConsumption is True
-    assert res_map[2].category == ExpenseCategory.ETC
-    assert res_map[2].expenseType == ExpenseType.VARIABLE
+
+def test_missing_llm_result_uses_fallback():
+    llm_service = Mock()
+    llm_service.classify_with_llm.return_value = []
+
+    service = TransactionClassificationService(llm_service=llm_service)
+
+    result = service.classify_transactions(
+        [create_transaction(desc3="알 수 없는 거래")]
+    )[0]
+
+    assert result.isConsumption is True
+    assert result.category == ExpenseCategory.ETC
+    assert result.expenseType == ExpenseType.VARIABLE
+
+
+def test_duplicate_llm_results_use_fallback():
+    llm_service = Mock()
+    duplicated_result = TransactionClassificationResult(
+        transactionId=1,
+        isConsumption=True,
+        category=ExpenseCategory.FOOD,
+        expenseType=ExpenseType.VARIABLE,
+    )
+    llm_service.classify_with_llm.return_value = [
+        duplicated_result,
+        duplicated_result,
+    ]
+
+    service = TransactionClassificationService(llm_service=llm_service)
+
+    result = service.classify_transactions(
+        [create_transaction(desc3="알 수 없는 거래")]
+    )[0]
+
+    assert result.category == ExpenseCategory.ETC
+    assert result.expenseType == ExpenseType.VARIABLE
+
+
+def test_unknown_llm_transaction_id_is_ignored():
+    llm_service = Mock()
+    llm_service.classify_with_llm.return_value = [
+        TransactionClassificationResult(
+            transactionId=999,
+            isConsumption=True,
+            category=ExpenseCategory.FOOD,
+            expenseType=ExpenseType.VARIABLE,
+        )
+    ]
+
+    service = TransactionClassificationService(llm_service=llm_service)
+
+    result = service.classify_transactions(
+        [create_transaction(transaction_id=1, desc3="알 수 없는 거래")]
+    )[0]
+
+    assert result.transactionId == 1
+    assert result.category == ExpenseCategory.ETC
+
+
+def test_invalid_non_consumption_llm_result_uses_fallback():
+    llm_service = Mock()
+    llm_service.classify_with_llm.return_value = [
+        TransactionClassificationResult(
+            transactionId=1,
+            isConsumption=False,
+            category=ExpenseCategory.FOOD,
+            expenseType=ExpenseType.VARIABLE,
+        )
+    ]
+
+    service = TransactionClassificationService(llm_service=llm_service)
+
+    result = service.classify_transactions(
+        [create_transaction(desc3="알 수 없는 거래")]
+    )[0]
+
+    assert result.isConsumption is True
+    assert result.category == ExpenseCategory.ETC
+    assert result.expenseType == ExpenseType.VARIABLE
+
+
+def test_api_classifies_structured_request():
+    response = client.post(
+        "/api/v1/classify-transactions",
+        json={
+            "transactions": [
+                {
+                    "transactionId": 101,
+                    "amount": 15_000,
+                    "transactionCategory": "ORDINARY",
+                    "organizationCode": "0004",
+                    "desc1": None,
+                    "desc2": "FBS출금",
+                    "desc3": "스타벅스 강남점",
+                    "desc4": "강남지점",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+
+    body = response.json()
+    result = body["data"]["results"][0]
+
+    assert result == {
+        "transactionId": 101,
+        "isConsumption": True,
+        "category": "FOOD",
+        "expenseType": "VARIABLE",
+    }
