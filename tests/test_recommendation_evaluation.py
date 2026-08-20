@@ -92,7 +92,7 @@ def test_supported_recommendation_directions_are_deterministic(
     assert first_response.recommended_product == second_response.recommended_product
     assert first_response.simulated_extra_income == second_response.simulated_extra_income
     assert first_result.final_recommended_product == second_result.final_recommended_product
-    assert first_chroma.calls[0]["n_results"] == 5
+    assert first_chroma.calls[0]["n_results"] == 10_000
 
 
 @pytest.mark.parametrize("llm_mode", ["error", "invalid_json"])

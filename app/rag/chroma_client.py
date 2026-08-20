@@ -100,6 +100,46 @@ class ChromaManager:
         """
         return self.search_products(query_text=query_text, n_results=1)[0]
 
+    def search_finlife_products_with_scores(
+        self,
+        query_text: str,
+    ) -> tuple[list[dict], dict[str, float]]:
+        """Return every Finlife saving/deposit plus its cosine similarity.
+
+        Issue #38 serving collections are created with cosine space. Vector
+        order never limits eligibility: all records are deterministically
+        rescored by the recommendation service.
+        """
+        collection = self.get_or_create_collection()
+        count = collection.count()
+        if count <= 0:
+            raise ValueError("ChromaDB에서 일치하는 금융상품 후보를 찾지 못했습니다.")
+        query_vector = self.embeddings.embed_query(query_text)
+        results = collection.query(
+            query_embeddings=[query_vector],
+            n_results=count,
+            include=["metadatas", "distances"],
+        )
+        metadatas = (results.get("metadatas") or [[]])[0]
+        distances = (results.get("distances") or [[]])[0]
+        pairs = []
+        for metadata, distance in zip(metadatas, distances):
+            if metadata.get("product_type") not in {"SAVINGS", "DEPOSIT"}:
+                continue
+            if metadata.get("validation_status", "VALID") != "VALID":
+                continue
+            if metadata.get("sync_observation_status", "SEEN") != "SEEN":
+                continue
+            product = self._metadata_to_product(metadata)
+            pairs.append((product, 1.0 - float(distance)))
+        pairs.sort(key=lambda pair: pair[0]["product_id"])
+        if not pairs:
+            raise ValueError("ChromaDB에서 일치하는 금융상품 후보를 찾지 못했습니다.")
+        return (
+            [pair[0] for pair in pairs],
+            {pair[0]["product_id"]: pair[1] for pair in pairs},
+        )
+
     def _metadata_to_product(
         self,
         metadata: dict,

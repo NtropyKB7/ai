@@ -1,6 +1,9 @@
 import json
 import logging
+from decimal import Decimal
 from typing import Any
+
+from pydantic import ValidationError
 
 from langchain_openai import ChatOpenAI
 
@@ -13,6 +16,12 @@ from app.schemas.product import (
     ProductRecommendationRequest,
     ProductRecommendationResponse,
 )
+from app.services.financial_product_interest_service import FinancialProductInterestService
+from app.services.personalized_product_scoring_service import (
+    CandidateScore,
+    PersonalizedProductScoringService,
+)
+from app.services.recommendation_profile_service import RecommendationProfileService
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +51,9 @@ class RecommendationService:
 
         # 검색 매니저도 주입 가능하게 두어, 테스트에서 외부 의존성을 줄일 수 있게 합니다.
         self.chroma_manager = chroma or chroma_manager
+        self.profile_service = RecommendationProfileService()
+        self.scoring_service = PersonalizedProductScoringService()
+        self.interest_service = FinancialProductInterestService()
 
     async def generate_recommendation(
         self,
@@ -59,6 +71,9 @@ class RecommendationService:
         6. LLM 실패 시 fallback 문구 사용
         """
         category_expenses = self._parse_category_expenses(request.category_expenses)
+        profile = self.profile_service.build(request, category_expenses)
+        if profile.investment_budget <= 0:
+            raise ValueError("추천 가능한 투자 예산이 없습니다.")
         financial_type = self._classify_financial_type(request)
         financial_activity_insight = self._build_financial_activity_insight(
             request=request,
@@ -72,17 +87,24 @@ class RecommendationService:
             category_expenses=category_expenses,
             financial_type=financial_type,
         )
+        search_query = f"{search_query} | {profile.search_document()}"
 
-        candidate_products = self.chroma_manager.search_products(
-            query_text=search_query,
-            n_results=5,
+        if hasattr(self.chroma_manager, "search_finlife_products_with_scores"):
+            candidate_products, similarities = (
+                self.chroma_manager.search_finlife_products_with_scores(search_query)
+            )
+        else:
+            candidate_products = self.chroma_manager.search_products(
+                query_text=search_query, n_results=10_000
+            )
+            similarities = {}
+        ranked = self.scoring_service.score_all(
+            candidate_products, profile, similarities
         )
-        selected_product = self._select_best_product(
-            products=candidate_products,
-            request=request,
-            category_expenses=category_expenses,
-            financial_type=financial_type,
-        )
+        if not ranked:
+            raise ValueError("추천 후보 상품이 비어 있습니다.")
+        selected = ranked[0]
+        selected_product = self._recommendation_product(selected)
 
         product = FinancialProductSchema(**selected_product)
 
@@ -90,6 +112,7 @@ class RecommendationService:
             product=selected_product,
             request=request,
             category_expenses=category_expenses,
+            profile=profile,
         )
 
         # 각 응답 필드의 기본값을 먼저 만들어 둡니다.
@@ -113,8 +136,10 @@ class RecommendationService:
             category_expenses=category_expenses,
         )
 
+        # Product reasoning is evidence-bound and deterministic. LLM prose is
+        # accepted only for the remaining report fields.
         merged_texts = self._merge_llm_texts_with_defaults(
-            llm_result=llm_result,
+            llm_result={k: v for k, v in llm_result.items() if k != "reasoning"},
             default_texts=default_texts,
         )
 
@@ -144,15 +169,19 @@ class RecommendationService:
         try:
             raw_value = json.loads(category_expenses_text)
         except json.JSONDecodeError:
-            logger.warning("category_expenses JSON 파싱 실패: %s", category_expenses_text)
+            logger.warning("category_expenses JSON 파싱 실패")
             return []
 
         if isinstance(raw_value, list):
-            return [
-                CategoryExpenseSummary(**item)
-                for item in raw_value
-                if isinstance(item, dict)
-            ]
+            parsed = []
+            for item in raw_value:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    parsed.append(CategoryExpenseSummary(**item))
+                except ValidationError:
+                    continue
+            return parsed
 
         if isinstance(raw_value, dict):
             return [
@@ -416,6 +445,7 @@ class RecommendationService:
         product: dict[str, Any],
         request: ProductRecommendationRequest,
         category_expenses: list[CategoryExpenseSummary],
+        profile=None,
     ) -> int:
         """
         추천 상품을 사용했을 때의 예상 추가 수익 또는 절감 금액을 계산합니다.
@@ -423,16 +453,16 @@ class RecommendationService:
         product_type = product.get("product_type")
         details = product.get("details", {})
 
-        if product_type == "SAVINGS":
-            interest_rate = float(details.get("interest_rate", 3.0)) / 100
-            available_funds = max(request.available_funds or 0, 0)
-            max_monthly_amount = int(
-                details.get("maxMonthlyAmount")
-                or details.get("max_monthly_amount")
-                or available_funds
+        if product_type in {"SAVINGS", "DEPOSIT"}:
+            effective_profile = profile or self.profile_service.build(
+                request, category_expenses
             )
-            principal = min(available_funds, max_monthly_amount)
-            return int((principal * interest_rate) / 12)
+            return self.interest_service.monthly_interest(
+                product_type=product_type,
+                investment_budget=effective_profile.investment_budget,
+                annual_base_rate=Decimal(str(details["interest_rate"])),
+                term_months=int(details["term_months"]),
+            )
 
         if product_type == "CARD":
             discount_rate = float(details.get("discount_rate", 0.1))
@@ -461,6 +491,28 @@ class RecommendationService:
             return simulated_benefit
 
         return 0
+
+    @staticmethod
+    def _recommendation_product(scored: CandidateScore) -> dict[str, Any]:
+        product = dict(scored.product)
+        details = dict(product.get("details") or {})
+        details["recommendation_score_breakdown"] = {
+            "financial_benefit_score": scored.financial_benefit_score,
+            "semantic_relevance_score": scored.semantic_relevance_score,
+            "financial_suitability_score": scored.financial_suitability_score,
+            "condition_match_score": scored.condition_match_score,
+            "personalized_score": scored.personalized_score,
+        }
+        details["recommendation_evidence"] = [
+            {
+                "evidence_type": item.evidence_type.value,
+                "source_field": item.source_field,
+                "normalized_key": item.normalized_key,
+            }
+            for item in scored.evidences
+        ]
+        product["details"] = details
+        return product
 
     def _find_best_matching_category(
         self,
@@ -584,6 +636,9 @@ class RecommendationService:
             }
             for item in request.job_insight_inputs
         ]
+        allowed_evidence = product.details.get("recommendation_evidence") or []
+        score_breakdown = product.details.get("recommendation_score_breakdown") or {}
+        selected_option = product.details.get("selected_option") or {}
 
         # 프롬프트도 필드별 역할을 더 분명히 적어 주어,
         # reasoning / financial_activity_insight / job_insight / future_income_trend가
@@ -616,6 +671,11 @@ class RecommendationService:
 - 상품 유형: {product.product_type}
 - 상품 요약: {product.summary}
 - N잡 활용 팁: {product.njob_trend_tip}
+- 선택 옵션 기본금리: {selected_option.get('base_interest_rate')}
+- 선택 옵션 최고우대금리(계산 미사용): {selected_option.get('preferred_interest_rate')}
+- 선택 옵션 기간(개월): {selected_option.get('term_months')}
+- 허용된 개인화 근거: {json.dumps(allowed_evidence, ensure_ascii=False)}
+- 점수 breakdown: {json.dumps(score_breakdown, ensure_ascii=False)}
 - 예상 추가 수익 또는 절감액: {simulated_extra_income}원
 
 [필드별 작성 책임]
@@ -634,6 +694,8 @@ class RecommendationService:
 
 [공통 규칙]
 - 과장된 수익 보장 표현은 금지합니다.
+- 허용된 개인화 근거에 없는 혜택, 대상, 우대조건은 생성하지 않습니다.
+- 의미 유사도 점수만으로 개인화 사실을 단정하지 않습니다.
 - 각 필드는 서로 다른 역할을 가져야 합니다.
 - 수치 나열만 하지 말고 해석형 문장으로 작성합니다.
 - 반드시 JSON 객체만 반환합니다.
@@ -711,10 +773,24 @@ class RecommendationService:
         상품 중심으로만 작성합니다.
         """
         if product.product_type == "SAVINGS":
+            evidence = product.details.get("recommendation_evidence") or []
+            structure = ""
+            kinds = {item.get("evidence_type") for item in evidence}
+            if "FLEXIBLE_INSTALLMENT_MATCH" in kinds:
+                structure = " 소득 흐름 변화에 대응할 수 있는 자유적립 구조가 확인됐습니다."
+            elif "STABLE_FIXED_INSTALLMENT_MATCH" in kinds:
+                structure = " 현재 현금흐름과 맞는 정액적립 구조가 확인됐습니다."
             return (
-                f"{product.product_name}은 현재 가용자금 "
-                f"{self._format_won(request.available_funds)} 범위 안에서 무리 없이 활용할 수 있는 적립형 상품입니다. "
-                f"예상 추가 이자 수익은 약 {self._format_won(simulated_extra_income)}입니다."
+                f"{product.product_name}은 선택된 보장 기본금리와 가입 기간을 기준으로 비교된 적금입니다."
+                f"{structure} 이번 달 잉여자금의 50%를 월 납입액으로 가정한 월 예상 세전 이자는 "
+                f"약 {self._format_won(simulated_extra_income)}입니다."
+            )
+
+        if product.product_type == "DEPOSIT":
+            return (
+                f"{product.product_name}은 선택된 보장 기본금리와 가입 기간을 기준으로 비교된 정기예금입니다. "
+                "예치 원금은 전체 보유 목돈이 아니라 이번 달 잉여자금의 50%만 일시 예치한다고 가정했습니다. "
+                f"월 예상 세전 이자는 약 {self._format_won(simulated_extra_income)}입니다."
             )
 
         return (
