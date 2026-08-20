@@ -27,8 +27,10 @@ class ProductDocumentBuilder:
             f"상품명: {product.product_name}",
             f"상품유형: {product.product_type}",
             f"금융사: {product.provider}",
-            f"핵심혜택: {product.summary}",
         ]
+
+        if product.summary:
+            document_parts.append(f"핵심혜택: {product.summary}")
 
         if product.target_group:
             document_parts.append(f"추천대상: {product.target_group}")
@@ -76,6 +78,28 @@ class ProductDocumentBuilder:
         """
         if not details:
             return ""
+
+        if details.get("source") == "FSS_FINLIFE":
+            parts = []
+            source_fields = [
+                "join_way",
+                "maturity_interest_text",
+                "special_conditions_text",
+                "join_restriction_code",
+                "eligible_members_text",
+                "notes_text",
+                "max_limit",
+            ]
+            for key in source_fields:
+                value = details.get(key)
+                if value is not None:
+                    parts.append(f"{key}={value}")
+            if details.get("options"):
+                parts.append(
+                    "options="
+                    + json.dumps(details["options"], ensure_ascii=False, sort_keys=True)
+                )
+            return ", ".join(parts)
 
         allowed_keys = [
             "interest_rate",

@@ -1,6 +1,9 @@
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+_SUPPORTED_PRODUCT_TYPES = {"CARD", "SAVINGS", "DEPOSIT"}
 
 
 class RawFinancialProduct(BaseModel):
@@ -15,10 +18,18 @@ class RawFinancialProduct(BaseModel):
     product_name: str = Field(..., description="금융상품명")
     product_type: str = Field(..., description="상품 유형. 예: CARD, SAVINGS")
     provider: str = Field(..., description="금융사명")
-    summary: str = Field(..., description="핵심 혜택 요약")
+    summary: Optional[str] = Field(default=None, description="핵심 혜택 요약")
     target_group: Optional[str] = Field(default=None, description="추천 대상 고객군")
     njob_trend_tip: Optional[str] = Field(default=None, description="N잡 활용 팁")
     details: dict[str, Any] = Field(default_factory=dict, description="상품 상세 정보")
+
+    @field_validator("product_type", mode="before")
+    @classmethod
+    def validate_product_type(cls, value: str) -> str:
+        normalized = (value or "").strip().upper()
+        if normalized not in _SUPPORTED_PRODUCT_TYPES:
+            raise ValueError("product_type must be CARD, SAVINGS, or DEPOSIT")
+        return normalized
 
 
 class NormalizedFinancialProduct(BaseModel):
@@ -41,6 +52,14 @@ class NormalizedFinancialProduct(BaseModel):
     # 추천/검색 보조 메타데이터
     tags: list[str] = Field(default_factory=list, description="상품 검색/추천용 태그 목록")
     is_active: bool = Field(default=True, description="현재 추천 대상 활성 여부")
+
+    @field_validator("product_type", mode="before")
+    @classmethod
+    def validate_product_type(cls, value: str) -> str:
+        normalized = (value or "").strip().upper()
+        if normalized not in _SUPPORTED_PRODUCT_TYPES:
+            raise ValueError("product_type must be CARD, SAVINGS, or DEPOSIT")
+        return normalized
 
 
 class ProductKnowledgeDocument(BaseModel):

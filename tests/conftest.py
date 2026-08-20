@@ -35,6 +35,10 @@ class _IsolatedEmbeddingAdapter:
         return [0.0]
 
 
+_ORIGINAL_HUGGINGFACE_EMBEDDINGS = langchain_huggingface.HuggingFaceEmbeddings
+langchain_huggingface.HuggingFaceEmbeddings = _IsolatedEmbeddingAdapter
+
+
 class _IsolatedCollection:
     def upsert(self, **kwargs):
         return None
@@ -58,6 +62,16 @@ class _IsolatedChromaClient:
 
 _ORIGINAL_SOCKET_CONNECT = socket.socket.connect
 _ORIGINAL_CREATE_CONNECTION = socket.create_connection
+_ORIGINAL_CHROMA_DB_DIR = os.environ.get("CHROMA_DB_DIR")
+_ORIGINAL_OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+_ORIGINAL_FINLIFE_API_KEY = os.environ.get("FINLIFE_API_KEY")
+_SESSION_CHROMA_DIRECTORY = tempfile.TemporaryDirectory(
+    prefix="ntropy-ai-pytest-chroma-",
+    ignore_cleanup_errors=True,
+)
+os.environ["CHROMA_DB_DIR"] = _SESSION_CHROMA_DIRECTORY.name
+os.environ["OPENAI_API_KEY"] = "synthetic-test-openai-key"
+os.environ["FINLIFE_API_KEY"] = "synthetic-test-finlife-key"
 
 
 def _is_loopback(address) -> bool:
@@ -77,6 +91,30 @@ def _guard_create_connection(address, *args, **kwargs):
     if _is_loopback(address):
         return _ORIGINAL_CREATE_CONNECTION(address, *args, **kwargs)
     raise AssertionError(f"Automated tests must not access external address: {address!r}")
+
+
+# Apply safety guards before pytest imports application test modules.
+socket.socket.connect = _guard_socket_connect
+socket.create_connection = _guard_create_connection
+
+
+def pytest_sessionfinish(session, exitstatus):
+    socket.socket.connect = _ORIGINAL_SOCKET_CONNECT
+    socket.create_connection = _ORIGINAL_CREATE_CONNECTION
+    langchain_huggingface.HuggingFaceEmbeddings = _ORIGINAL_HUGGINGFACE_EMBEDDINGS
+    if _ORIGINAL_CHROMA_DB_DIR is None:
+        os.environ.pop("CHROMA_DB_DIR", None)
+    else:
+        os.environ["CHROMA_DB_DIR"] = _ORIGINAL_CHROMA_DB_DIR
+    if _ORIGINAL_OPENAI_API_KEY is None:
+        os.environ.pop("OPENAI_API_KEY", None)
+    else:
+        os.environ["OPENAI_API_KEY"] = _ORIGINAL_OPENAI_API_KEY
+    if _ORIGINAL_FINLIFE_API_KEY is None:
+        os.environ.pop("FINLIFE_API_KEY", None)
+    else:
+        os.environ["FINLIFE_API_KEY"] = _ORIGINAL_FINLIFE_API_KEY
+    _SESSION_CHROMA_DIRECTORY.cleanup()
 
 
 @pytest.fixture(scope="module")
