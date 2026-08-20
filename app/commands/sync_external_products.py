@@ -118,7 +118,11 @@ def main(argv=None) -> int:
         )
         result = ExternalProductSyncService(
             staging=InMemoryExternalStagingAdapter(),
-            embedder=DeterministicLocalEmbedder(),
+            embedder=(
+                DeterministicLocalEmbedder()
+                if args.apply_to_fake_staging
+                else None
+            ),
         ).sync(
             products,
             SnapshotCompleteness() if combined else SnapshotCompleteness(all_pages_succeeded=False),

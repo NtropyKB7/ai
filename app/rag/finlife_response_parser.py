@@ -27,7 +27,7 @@ def parse_finlife_response(payload: dict, expected_type: ProductType) -> Finlife
 
     if not result.is_success:
         raise FinlifeResponseError(result.err_cd, result.err_msg)
-    if result.prdt_div != expected_div:
+    if result.prdt_div is not None and result.prdt_div != expected_div:
         raise ValueError("prdt_div and requested product type do not match")
     required = (result.total_count, result.max_page_no, result.now_page_no)
     if any(value is None for value in required):

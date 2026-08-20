@@ -17,6 +17,14 @@ class ValidationStatus(str, Enum):
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
 
 
+class MappingIssueKind(str, Enum):
+    UNKNOWN = "UNKNOWN"
+    ORPHAN_OPTION = "ORPHAN_OPTION"
+    MISSING_REQUIRED_FIELD = "MISSING_REQUIRED_FIELD"
+    PRODUCT_MAPPING_FAILED = "PRODUCT_MAPPING_FAILED"
+    OPTIONS_MISSING = "OPTIONS_MISSING"
+
+
 class SyncObservationStatus(str, Enum):
     SEEN = "SEEN"
     MISSING_FROM_SOURCE = "MISSING_FROM_SOURCE"
@@ -57,6 +65,7 @@ class ProductSyncResult(BaseModel):
 class MappingIssue(BaseModel):
     knowledge_id: str | None = None
     validation_status: ValidationStatus
+    issue_kind: MappingIssueKind = MappingIssueKind.UNKNOWN
     message: str
 
 

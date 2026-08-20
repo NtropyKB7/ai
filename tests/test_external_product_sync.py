@@ -12,6 +12,11 @@ from app.rag.financial_product_source import FakeFinancialProductSource
 from app.schemas.finlife_product import ProductType, SnapshotCompleteness
 from app.schemas.product_sync import SnapshotWriteSafety
 from app.services.external_product_sync_service import ExternalProductSyncService
+from app.services.external_product_sync_service import (
+    apply_sync_plan,
+    build_sync_plan,
+    materialize_embeddings,
+)
 from finlife_fixtures import response
 
 
@@ -108,10 +113,95 @@ def test_rate_term_and_condition_changes_are_detected():
 
 def test_dry_run_does_not_write():
     adapter = InMemoryExternalStagingAdapter()
-    result = service(adapter).sync([product()], SnapshotCompleteness(), dry_run=True)
+    embedder = CountingEmbedder()
+    result = service(adapter, embedder).sync(
+        [product()], SnapshotCompleteness(), dry_run=True
+    )
     assert result.created_count == 1
+    assert result.embedded_count == 0
     assert result.upserted_count == 0
+    assert embedder.texts == []
     assert adapter.get_all() == {}
+
+
+def test_build_sync_plan_is_pure_and_deterministic():
+    products = [product(ProductType.DEPOSIT), product(ProductType.SAVINGS)]
+    first = build_sync_plan(products, {}, SnapshotCompleteness())
+    second = build_sync_plan(products, {}, SnapshotCompleteness())
+    assert first.result == second.result
+    assert first.write_records == second.write_records
+    assert first.result.embedded_count == 0
+    assert first.result.upserted_count == 0
+    assert all(record.embedding is None for record in first.write_records)
+
+
+def test_read_only_comparison_dry_run_never_embeds_or_upserts():
+    class ReadOnlySpy(InMemoryExternalStagingAdapter):
+        def __init__(self):
+            super().__init__()
+            self.reads = 0
+            self.writes = 0
+
+        def get_all(self):
+            self.reads += 1
+            return super().get_all()
+
+        def upsert(self, records):
+            self.writes += 1
+            raise AssertionError("dry-run must not write")
+
+    staging = ReadOnlySpy()
+    result = ExternalProductSyncService(staging).sync(
+        [product()], SnapshotCompleteness(), dry_run=True
+    )
+    assert staging.reads == 1
+    assert staging.writes == 0
+    assert result.embedded_count == result.upserted_count == 0
+
+
+def test_materialize_embeds_only_new_and_changed_before_apply():
+    initial_products = [product(ProductType.SAVINGS), product(ProductType.DEPOSIT)]
+    staging = InMemoryExternalStagingAdapter()
+    initial = build_sync_plan(initial_products, {}, SnapshotCompleteness())
+    initial_materialized = materialize_embeddings(initial, CountingEmbedder())
+    apply_sync_plan(initial_materialized, staging)
+
+    changed = initial_products[0].model_copy(deep=True)
+    changed.details["special_conditions_text"] = "합성 변경"
+    comparison = build_sync_plan(
+        [changed, initial_products[1]], staging.get_all(), SnapshotCompleteness()
+    )
+    embedder = CountingEmbedder()
+    materialized = materialize_embeddings(comparison, embedder)
+    assert comparison.result.updated_count == 1
+    assert comparison.result.unchanged_count == 1
+    assert len(embedder.texts) == 1
+    result = apply_sync_plan(materialized, staging)
+    assert result.embedded_count == 1
+    assert result.upserted_count == 1
+
+
+def test_apply_never_starts_when_any_embedding_fails():
+    class IncompleteEmbedder:
+        def embed_documents(self, texts):
+            return []
+
+    class WriteSpy(InMemoryExternalStagingAdapter):
+        def __init__(self):
+            super().__init__()
+            self.writes = 0
+
+        def upsert(self, records):
+            self.writes += 1
+            super().upsert(records)
+
+    staging = WriteSpy()
+    plan = build_sync_plan([product()], {}, SnapshotCompleteness())
+    import pytest
+
+    with pytest.raises(ValueError, match="unexpected number"):
+        materialize_embeddings(plan, IncompleteEmbedder())
+    assert staging.writes == 0
 
 
 def test_incomplete_snapshot_never_observes_missing():

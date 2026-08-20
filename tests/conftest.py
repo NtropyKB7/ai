@@ -63,11 +63,15 @@ class _IsolatedChromaClient:
 _ORIGINAL_SOCKET_CONNECT = socket.socket.connect
 _ORIGINAL_CREATE_CONNECTION = socket.create_connection
 _ORIGINAL_CHROMA_DB_DIR = os.environ.get("CHROMA_DB_DIR")
+_ORIGINAL_OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+_ORIGINAL_FINLIFE_API_KEY = os.environ.get("FINLIFE_API_KEY")
 _SESSION_CHROMA_DIRECTORY = tempfile.TemporaryDirectory(
     prefix="ntropy-ai-pytest-chroma-",
     ignore_cleanup_errors=True,
 )
 os.environ["CHROMA_DB_DIR"] = _SESSION_CHROMA_DIRECTORY.name
+os.environ["OPENAI_API_KEY"] = "synthetic-test-openai-key"
+os.environ["FINLIFE_API_KEY"] = "synthetic-test-finlife-key"
 
 
 def _is_loopback(address) -> bool:
@@ -102,6 +106,14 @@ def pytest_sessionfinish(session, exitstatus):
         os.environ.pop("CHROMA_DB_DIR", None)
     else:
         os.environ["CHROMA_DB_DIR"] = _ORIGINAL_CHROMA_DB_DIR
+    if _ORIGINAL_OPENAI_API_KEY is None:
+        os.environ.pop("OPENAI_API_KEY", None)
+    else:
+        os.environ["OPENAI_API_KEY"] = _ORIGINAL_OPENAI_API_KEY
+    if _ORIGINAL_FINLIFE_API_KEY is None:
+        os.environ.pop("FINLIFE_API_KEY", None)
+    else:
+        os.environ["FINLIFE_API_KEY"] = _ORIGINAL_FINLIFE_API_KEY
     _SESSION_CHROMA_DIRECTORY.cleanup()
 
 

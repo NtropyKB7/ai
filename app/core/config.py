@@ -1,3 +1,6 @@
+from typing import Optional
+
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 
 
@@ -7,6 +10,16 @@ class Settings(BaseSettings):
     """
 
     OPENAI_API_KEY: str
+
+    # Finlife HTTP access is optional until the explicit collector/CLI is used.
+    FINLIFE_API_KEY: Optional[SecretStr] = None
+    FINLIFE_BASE_URL: str = "https://finlife.fss.or.kr"
+    FINLIFE_SAVINGS_PATH: str = "/finlifeapi/savingProductsSearch.json"
+    FINLIFE_DEPOSIT_PATH: str = "/finlifeapi/depositProductsSearch.json"
+    FINLIFE_CONNECT_TIMEOUT_SECONDS: float = 5.0
+    FINLIFE_READ_TIMEOUT_SECONDS: float = 15.0
+    FINLIFE_WRITE_TIMEOUT_SECONDS: float = 5.0
+    FINLIFE_POOL_TIMEOUT_SECONDS: float = 5.0
 
     # ------------------------------------------------------------------
     # ChromaDB / 금융상품 지식 DB 관련 설정

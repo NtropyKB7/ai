@@ -17,6 +17,7 @@ from app.schemas.finlife_product import (
 )
 from app.schemas.product_knowledge import RawFinancialProduct
 from app.schemas.product_sync import (
+    MappingIssueKind,
     MappingIssue,
     ProductMappingResult,
     ValidationStatus,
@@ -91,6 +92,7 @@ class FinlifeProductMapper:
             MappingIssue(
                 knowledge_id=self._knowledge_id_from_key(product_type, key),
                 validation_status=ValidationStatus.INVALID,
+                issue_kind=MappingIssueKind.ORPHAN_OPTION,
                 message=f"Orphan option rows: {key}",
             )
             for key in sorted(set(options) - set(bases))
@@ -102,6 +104,7 @@ class FinlifeProductMapper:
                 issues.append(MappingIssue(
                     knowledge_id=knowledge_id,
                     validation_status=ValidationStatus.INVALID,
+                    issue_kind=MappingIssueKind.MISSING_REQUIRED_FIELD,
                     message=f"Missing required product field: {knowledge_id}",
                 ))
                 continue
@@ -114,6 +117,7 @@ class FinlifeProductMapper:
                 issues.append(MappingIssue(
                     knowledge_id=knowledge_id,
                     validation_status=ValidationStatus.INVALID,
+                    issue_kind=MappingIssueKind.PRODUCT_MAPPING_FAILED,
                     message=f"Product mapping failed: {knowledge_id}: {exc}",
                 ))
                 continue
@@ -122,6 +126,7 @@ class FinlifeProductMapper:
                 issues.append(MappingIssue(
                     knowledge_id=knowledge_id,
                     validation_status=ValidationStatus.REVIEW_REQUIRED,
+                    issue_kind=MappingIssueKind.OPTIONS_MISSING,
                     message=f"Product has no options: {knowledge_id}",
                 ))
         return ProductMappingResult(
