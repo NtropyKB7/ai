@@ -16,6 +16,7 @@ __pycache__/
 
 # 4. 로컬 Chroma Vector DB 저장소 제외 (서버 환경 DB와 분리 및 용량 절감)
 .chroma/
+.local/
 
 # 5. Git 버전 관리 관련 내역 제외
 .git/
