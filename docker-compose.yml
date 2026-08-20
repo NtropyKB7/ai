@@ -11,3 +11,12 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    environment:
+      # CHROMA_HOST_DIR is resolved by Docker Compose on the host.  The
+      # application must only see the fixed container path below.
+      CHROMA_DB_DIR: /data/chroma
+      FINANCIAL_PRODUCT_COLLECTION: ${FINANCIAL_PRODUCT_COLLECTION:-financial_products}
+    volumes:
+      - type: bind
+        source: ${CHROMA_HOST_DIR:-./.local/chroma-data}
+        target: /data/chroma
