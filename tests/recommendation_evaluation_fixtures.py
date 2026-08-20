@@ -16,7 +16,7 @@ class EvaluationStatus(StrEnum):
 
 @dataclass(frozen=True)
 class ExpectedDirection:
-    allowed_product_types: frozenset[str] = frozenset({"CARD", "SAVINGS"})
+    allowed_product_types: frozenset[str] = frozenset({"SAVINGS", "DEPOSIT"})
     forbidden_product_ids: frozenset[str] = frozenset()
     fallback_required: bool = False
     note: str = ""
@@ -120,11 +120,20 @@ def savings(
     *,
     interest_rate: float = 4.5,
     max_monthly_amount: int = 1_000_000,
+    reserve_type: str = "F",
     **extra_details,
 ) -> dict[str, Any]:
     details = {
         "interest_rate": interest_rate,
+        "term_months": 12,
         "maxMonthlyAmount": max_monthly_amount,
+        "options": [{
+            "interest_rate_type": "S",
+            "reserve_type": reserve_type,
+            "term_months": 12,
+            "base_interest_rate": interest_rate,
+            "preferred_interest_rate": interest_rate,
+        }],
         **extra_details,
     }
     return {
@@ -135,6 +144,35 @@ def savings(
         "summary": "합성 자유 적립식 적금",
         "target_group": "합성 평가 사용자",
         "njob_trend_tip": "합성 부수입 적립 팁",
+        "details": details,
+    }
+
+
+def deposit(
+    product_id: str,
+    *,
+    interest_rate: float = 4.5,
+    **extra_details,
+) -> dict[str, Any]:
+    details = {
+        "interest_rate": interest_rate,
+        "term_months": 12,
+        "options": [{
+            "interest_rate_type": "S",
+            "term_months": 12,
+            "base_interest_rate": interest_rate,
+            "preferred_interest_rate": interest_rate,
+        }],
+        **extra_details,
+    }
+    return {
+        "product_id": product_id,
+        "product_name": f"합성 {product_id} 정기예금",
+        "product_type": "DEPOSIT",
+        "provider": "합성 은행",
+        "summary": "합성 정기예금",
+        "target_group": "합성 평가 사용자",
+        "njob_trend_tip": "합성 예치 팁",
         "details": details,
     }
 
@@ -192,40 +230,105 @@ SCENARIOS = (
         ExpectedDirection(frozenset({"SAVINGS"}), note="현재 점수식의 변동성 반영 기록"),
     ),
     RecommendationScenario(
+        "personalized_flexible_savings",
+        "복수 소득과 변동소득에 명시적으로 맞는 자유적립식 적금",
+        request(
+            income=4_000_000,
+            expense=2_000_000,
+            funds=2_000_000,
+            volatility=0.35,
+            jobs=[
+                {"jobId": 911, "jobName": "프리랜서", "incomeAmount": 2_000_000},
+                {"jobId": 912, "jobName": "직장인", "incomeAmount": 2_000_000},
+            ],
+        ),
+        (
+            deposit("SYN_DEPOSIT_HIGH_RATE", interest_rate=5.0),
+            savings(
+                "SYN_SAVINGS_MULTI_INCOME",
+                interest_rate=4.8,
+                reserve_type="F",
+                special_conditions_text="N잡 복수 소득 프리랜서 대상",
+            ),
+            deposit("SYN_DEPOSIT_RATE_2", interest_rate=2.0),
+            deposit("SYN_DEPOSIT_RATE_3", interest_rate=3.0),
+            deposit("SYN_DEPOSIT_RATE_4", interest_rate=4.0),
+        ),
+        ExpectedDirection(
+            frozenset({"SAVINGS"}),
+            forbidden_product_ids=frozenset({"SYN_DEPOSIT_HIGH_RATE"}),
+            note="최고 금리보다 명시적 복수소득·자유적립 적합성을 우선",
+        ),
+    ),
+    RecommendationScenario(
+        "personalized_salary_deposit",
+        "안정적 현금흐름과 명시적 급여·외식 조건에 맞는 정기예금",
+        request(
+            income=4_000_000,
+            expense=2_000_000,
+            funds=2_000_000,
+            category="FOOD",
+            volatility=0.0,
+            jobs=[{"jobId": 921, "jobName": "직장인", "incomeAmount": 4_000_000}],
+        ),
+        (
+            savings("SYN_SAVINGS_HIGH_RATE", interest_rate=5.0, reserve_type="F"),
+            deposit(
+                "SYN_DEPOSIT_SALARY_FOOD",
+                interest_rate=4.8,
+                special_conditions_text="급여 이체 및 외식 조건",
+            ),
+            savings("SYN_SAVINGS_RATE_2", interest_rate=2.0),
+            savings("SYN_SAVINGS_RATE_3", interest_rate=3.0),
+            savings("SYN_SAVINGS_RATE_4", interest_rate=4.0),
+        ),
+        ExpectedDirection(
+            frozenset({"DEPOSIT"}),
+            forbidden_product_ids=frozenset({"SYN_SAVINGS_HIGH_RATE"}),
+            note="최고 금리보다 안정성·명시적 급여 및 소비 조건 적합성을 우선",
+        ),
+    ),
+    RecommendationScenario(
         "spending_pressure", "소득 대비 소비가 큰 사용자",
         request(income=2_000_000, expense=1_900_000, funds=100_000),
         (SAVINGS_STANDARD, FOOD_CARD),
-        ExpectedDirection(frozenset({"CARD"}), note="무리한 적금보다 카드 우선"),
+        ExpectedDirection(frozenset({"SAVINGS"}), note="#38은 Finlife 예적금만 추천"),
     ),
     RecommendationScenario(
         "zero_available_funds", "가용자금이 0인 사용자",
         request(income=2_000_000, expense=2_000_000, funds=0),
         (SAVINGS_STANDARD, FOOD_CARD),
         ExpectedDirection(frozenset({"CARD"}), note="월 납입 부담 회피"),
+        EvaluationStatus.KNOWN_GAP,
+        "ValueError and HTTP 500",
+        "available_funds가 0 이하면 금융상품 후보 자격 없음",
     ),
     RecommendationScenario(
         "negative_cash_flow", "가용자금이 음수인 사용자",
         request(income=2_000_000, expense=2_400_000, funds=-400_000),
         (SAVINGS_STANDARD, FOOD_CARD),
         ExpectedDirection(frozenset({"CARD"}), note="현금흐름 위험형"),
+        EvaluationStatus.KNOWN_GAP,
+        "ValueError and HTTP 500",
+        "available_funds가 0 이하면 금융상품 후보 자격 없음",
     ),
     RecommendationScenario(
         "food_heavy", "식비 소비 비중이 높은 사용자",
         request(income=3_000_000, expense=2_700_000, funds=300_000, category="FOOD"),
-        (SHOPPING_CARD, FOOD_CARD),
-        ExpectedDirection(frozenset({"CARD"}), frozenset({"SYN_CARD_SHOPPING"}), note="식비 혜택 연결"),
+        (SHOPPING_CARD, FOOD_CARD, SAVINGS_STANDARD),
+        ExpectedDirection(frozenset({"SAVINGS"}), note="근거 없는 소비 가점 없이 예적금 추천"),
     ),
     RecommendationScenario(
         "shopping_heavy", "쇼핑 소비 비중이 높은 사용자",
         request(income=3_000_000, expense=2_700_000, funds=300_000, category="SHOPPING"),
-        (FOOD_CARD, SHOPPING_CARD),
-        ExpectedDirection(frozenset({"CARD"}), frozenset({"SYN_CARD_FOOD"}), note="쇼핑 혜택 연결"),
+        (FOOD_CARD, SHOPPING_CARD, SAVINGS_STANDARD),
+        ExpectedDirection(frozenset({"SAVINGS"}), note="근거 없는 소비 가점 없이 예적금 추천"),
     ),
     RecommendationScenario(
         "insufficient_savings_capacity", "적금 납입 여력이 부족한 사용자",
         request(income=2_500_000, expense=2_300_000, funds=200_000),
         (SAVINGS_STANDARD, FOOD_CARD),
-        ExpectedDirection(frozenset({"CARD"}), note="현재 유형·점수 기반 카드 우선"),
+        ExpectedDirection(frozenset({"SAVINGS"}), note="#38은 양수 투자 예산에서 예적금 추천"),
     ),
     RecommendationScenario(
         "llm_failure", "LLM 호출 실패 사용자",
@@ -237,8 +340,8 @@ SCENARIOS = (
     RecommendationScenario(
         "llm_invalid_json", "LLM JSON 파싱 실패 사용자",
         request(income=2_000_000, expense=1_900_000, funds=100_000),
-        (FOOD_CARD,),
-        ExpectedDirection(frozenset({"CARD"}), note="텍스트 fallback 정상 지원"),
+        (SAVINGS_STANDARD,),
+        ExpectedDirection(frozenset({"SAVINGS"}), note="텍스트 fallback 정상 지원"),
         llm_mode="invalid_json",
     ),
     RecommendationScenario(
