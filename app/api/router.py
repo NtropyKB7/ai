@@ -22,7 +22,9 @@ from app.services.transaction_classification_service import (
 
 router = APIRouter()
 
-transaction_classification_service = TransactionClassificationService()
+transaction_classification_service = TransactionClassificationService(
+    llm_service=llm_service,
+)
 
 
 @router.get("/health")

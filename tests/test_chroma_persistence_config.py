@@ -38,6 +38,8 @@ def test_environment_example_contains_names_without_credentials():
 
     assert values == {
         "OPENAI_API_KEY": "",
+        "OPENAI_CLASSIFICATION_MODEL": "gpt-5-nano",
+        "OPENAI_GENERATION_MODEL": "gpt-4o-mini",
         "FINLIFE_API_KEY": "",
         "CHROMA_HOST_DIR": "./.local/chroma-data",
         "CHROMA_DB_DIR": "/data/chroma",
