@@ -5,6 +5,7 @@ from typing import Optional
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
+from app.core.config import settings
 from app.schemas.transaction import (
     ExpenseCategory,
     ExpenseType,
@@ -23,13 +24,14 @@ class LLMService:
 
     def __init__(
         self,
-        model_name: str = "gpt-4o-mini",
+        model_name: Optional[str] = None,
         api_key: Optional[str] = None,
     ):
+        self.model_name = model_name or settings.OPENAI_CLASSIFICATION_MODEL
         self.llm = ChatOpenAI(
-            model=model_name,
+            model=self.model_name,
             temperature=0.0,
-            api_key=api_key,
+            api_key=api_key or settings.OPENAI_API_KEY,
         ).with_structured_output(
             LLMTransactionClassificationResponse
         )
@@ -212,12 +214,10 @@ Additional rules:
 
             return response.results
 
-        except Exception as exception:
-            logger.error(
-                "LLM transaction classification failed: %s",
-                str(exception),
-                exc_info=True,
-            )
+        except Exception:
+            # 하위 OpenAI 예외에는 요청 URL이나 인증정보가 포함될 수 있어
+            # 원문과 traceback을 로그에 남기지 않습니다.
+            logger.error("LLM transaction classification failed")
 
             return [
                 TransactionClassificationResult(

@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     """
 
     OPENAI_API_KEY: str
+    OPENAI_CLASSIFICATION_MODEL: str = "gpt-5-nano"
+    OPENAI_GENERATION_MODEL: str = "gpt-4o-mini"
 
     # Finlife HTTP access is optional until the explicit collector/CLI is used.
     FINLIFE_API_KEY: Optional[SecretStr] = None

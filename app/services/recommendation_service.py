@@ -44,7 +44,7 @@ class RecommendationService:
     def __init__(self, llm: ChatOpenAI | None = None, chroma=None):
         # 테스트에서는 외부 LLM 대신 mock 객체를 넣을 수 있도록 주입 구조를 열어둡니다.
         self.llm = llm or ChatOpenAI(
-            model="gpt-4o-mini",
+            model=settings.OPENAI_GENERATION_MODEL,
             openai_api_key=settings.OPENAI_API_KEY,
             temperature=0.2,
         )
@@ -713,8 +713,9 @@ class RecommendationService:
         try:
             response = await self.llm.ainvoke(prompt)
             return self._parse_llm_json(response.content)
-        except Exception as error:
-            logger.error("추천 LLM 문구 생성 실패: %s", str(error), exc_info=True)
+        except Exception:
+            # 하위 OpenAI 예외 및 요청 원문을 외부 로그에 노출하지 않습니다.
+            logger.error("추천 LLM 문구 생성 실패")
             return {}
 
     def _parse_llm_json(
@@ -735,7 +736,7 @@ class RecommendationService:
         try:
             parsed = json.loads(cleaned)
         except json.JSONDecodeError:
-            logger.warning("LLM JSON 파싱 실패: %s", content)
+            logger.warning("LLM JSON 파싱 실패")
             return {}
 
         if not isinstance(parsed, dict):
