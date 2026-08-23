@@ -13,6 +13,9 @@ from app.schemas.transaction import (
     TransactionClassificationResult,
     TransactionForClassification,
 )
+from app.services.transaction_description_normalizer import (
+    normalize_transaction_description,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,17 @@ on the bank. Use them with the following priority:
 
 `organizationCode` identifies the financial institution and may help
 interpret the description fields.
+
+`desc3` may follow the source contract `paymentMethod_merchantName`.
+When normalized fields are present:
+
+- Treat `paymentMethod` only as the payment channel, not as the merchant.
+- Classify primarily from `merchantCandidate` and use the original fields
+  only as supporting context.
+- Cafes and beverage shops are `FOOD`.
+- Cosmetics, fashion, and household-goods sellers are `SHOPPING`.
+- Hobby workshops, one-day classes, performances, and ticket purchases are
+  `LEISURE`.
 
 ### Non-consumption
 
@@ -173,8 +187,10 @@ Additional rules:
         if not transactions:
             return []
 
-        input_data = [
-            {
+        input_data = []
+        for transaction in transactions:
+            description_context = normalize_transaction_description(transaction)
+            input_data.append({
                 "transactionId": transaction.transactionId,
                 "amount": transaction.amount,
                 "transactionCategory": (
@@ -185,9 +201,10 @@ Additional rules:
                 "desc2": transaction.desc2,
                 "desc3": transaction.desc3,
                 "desc4": transaction.desc4,
-            }
-            for transaction in transactions
-        ]
+                "originalDescription": description_context.original_description,
+                "paymentMethod": description_context.payment_method,
+                "merchantCandidate": description_context.merchant_candidate,
+            })
 
         try:
             prompt = ChatPromptTemplate.from_messages(
