@@ -1,3 +1,4 @@
+import logging
 import re
 from collections import Counter
 from typing import Optional
@@ -8,6 +9,12 @@ from app.schemas.transaction import (
     TransactionClassificationResult,
     TransactionForClassification,
 )
+from app.services.transaction_description_normalizer import (
+    normalize_transaction_description,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 class TransactionClassificationService:
@@ -58,9 +65,14 @@ class TransactionClassificationService:
         llm_results: list[TransactionClassificationResult] = []
 
         if unclassified_transactions and self.llm_service:
-            llm_results = self.llm_service.classify_with_llm(
-                unclassified_transactions
-            )
+            try:
+                llm_results = self.llm_service.classify_with_llm(
+                    unclassified_transactions
+                )
+            except Exception:
+                # 하위 예외에는 거래 원문이나 인증정보가 포함될 수 있으므로
+                # 원문과 traceback을 기록하지 않습니다.
+                logger.error("LLM transaction classification failed")
 
         unclassified_ids = {
             transaction.transactionId
@@ -97,6 +109,13 @@ class TransactionClassificationService:
             final_results.append(
                 self._create_fallback_result(transaction_id)
             )
+
+        logger.info(
+            "Transaction classification completed: rule=%d llm=%d fallback=%d",
+            len(rule_results),
+            len(llm_result_map),
+            len(transactions) - len(rule_results) - len(llm_result_map),
+        )
 
         return final_results
 
@@ -144,10 +163,12 @@ class TransactionClassificationService:
         desc3은 대부분 은행에서 상대방·가맹점·상품명이므로 가장 먼저
         사용하고, desc1·desc2·desc4는 보조 정보로 사용합니다.
         """
+        description_context = normalize_transaction_description(transaction)
+
         target_text = " ".join(
             value.strip()
             for value in (
-                transaction.desc3,
+                description_context.merchant_candidate,
                 transaction.desc1,
                 transaction.desc2,
                 transaction.desc4,
@@ -284,7 +305,7 @@ class TransactionClassificationService:
         ] = [
             (
                 r"(배달의민족|요기요|쿠팡이츠|식당|음식점|카페|"
-                r"스타벅스|투썸|할리스|이디야|베이커리|"
+                r"스타벅스|투썸|할리스|이디야|공차|베이커리|"
                 r"한식|중식|일식|양식|치킨|피자)",
                 ExpenseCategory.FOOD,
                 ExpenseType.VARIABLE,
@@ -321,14 +342,14 @@ class TransactionClassificationService:
             (
                 r"(쿠팡|11번가|네이버페이|G마켓|옥션|무신사|"
                 r"백화점|마트|이마트|홈플러스|롯데마트|"
-                r"다이소|올리브영)",
+                r"다이소|올리브영|29CM)",
                 ExpenseCategory.SHOPPING,
                 ExpenseType.VARIABLE,
             ),
             (
                 r"(CGV|메가박스|롯데시네마|넷플릭스|티빙|"
                 r"웨이브|왓챠|멜론|지니|PC방|골프|헬스|"
-                r"피트니스)",
+                r"피트니스|공방|원데이클래스|인터파크\s*티켓)",
                 ExpenseCategory.LEISURE,
                 ExpenseType.VARIABLE,
             ),
