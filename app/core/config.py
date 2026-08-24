@@ -18,12 +18,12 @@ class Settings(BaseSettings):
         le=16,
     )
     OPENAI_CLASSIFICATION_HTTP_TIMEOUT_SECONDS: float = Field(
-        default=25.0,
+        default=20.0,
         gt=0,
         le=120.0,
     )
     OPENAI_CLASSIFICATION_TIMEOUT_SECONDS: float = Field(
-        default=30.0,
+        default=25.0,
         gt=0,
         le=120.0,
     )
@@ -33,7 +33,7 @@ class Settings(BaseSettings):
         le=1,
     )
     OPENAI_CLASSIFICATION_CHUNK_SIZE: int = Field(
-        default=20,
+        default=5,
         ge=1,
         le=100,
     )

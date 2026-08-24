@@ -37,6 +37,16 @@ def test_model_settings_have_task_specific_defaults():
     assert configured.OPENAI_GENERATION_MODEL == "gpt-4o-mini"
 
 
+def test_classification_settings_use_operational_defaults():
+    configured = Settings(OPENAI_API_KEY="synthetic-key", _env_file=None)
+
+    assert configured.OPENAI_CLASSIFICATION_MAX_CONCURRENCY == 4
+    assert configured.OPENAI_CLASSIFICATION_HTTP_TIMEOUT_SECONDS == 20.0
+    assert configured.OPENAI_CLASSIFICATION_TIMEOUT_SECONDS == 25.0
+    assert configured.OPENAI_CLASSIFICATION_MAX_RETRIES == 0
+    assert configured.OPENAI_CLASSIFICATION_CHUNK_SIZE == 5
+
+
 def test_model_settings_allow_environment_override(monkeypatch):
     monkeypatch.setenv("OPENAI_CLASSIFICATION_MODEL", "classification-model")
     monkeypatch.setenv("OPENAI_GENERATION_MODEL", "generation-model")
