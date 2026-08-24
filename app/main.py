@@ -1,6 +1,17 @@
+import logging
+import sys
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.router import router
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:%(name)s:%(message)s",
+    stream=sys.stdout,
+    force=True,
+)
 
 # FastAPI 앱 메인 인스턴스 생성 및 Swagger API 문서 타이틀 설정
 app = FastAPI(
