@@ -118,7 +118,10 @@ def test_classification_failure_does_not_log_exception_details(
     with caplog.at_level(logging.ERROR):
         outcome = asyncio.run(service.classify_with_llm([transaction]))
 
-    assert outcome.results[0].transactionId == 1
+    assert outcome.results == []
+    assert outcome.success is False
+    assert outcome.chunk_count == 1
+    assert outcome.fallback_count == 1
     assert "secret-auth-value" not in caplog.text
     assert "민감한가맹점" not in caplog.text
 
@@ -166,7 +169,10 @@ def test_classification_success_logs_counts_without_sensitive_data(
     assert outcome.success is True
     assert "[거래 분류 LLM] 호출 완료" in caplog.text
     assert "llmTargetCount=1" in caplog.text
+    assert "chunkCount=1" in caplog.text
+    assert "resultCount=1" in caplog.text
     assert "rawResultCount=1" in caplog.text
+    assert "fallbackCount=0" in caplog.text
     assert "민감한가맹점" not in caplog.text
 
 

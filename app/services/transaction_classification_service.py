@@ -82,7 +82,7 @@ class TransactionClassificationService:
 
         llm_results: list[TransactionClassificationResult] = []
         llm_target_count = len(unclassified_transactions)
-        llm_used_fallback = False
+        chunk_count = 0
 
         if unclassified_transactions and self.llm_service:
             try:
@@ -94,11 +94,11 @@ class TransactionClassificationService:
                 else:
                     llm_outcome = llm_call
                 if isinstance(llm_outcome, LLMClassificationOutcome):
-                    llm_used_fallback = not llm_outcome.success
-                    if llm_outcome.success:
-                        llm_results = llm_outcome.results
+                    llm_results = llm_outcome.results
+                    chunk_count = llm_outcome.chunk_count
                 else:
                     llm_results = list(llm_outcome or [])
+                    chunk_count = 1 if unclassified_transactions else 0
             except Exception:
                 # 하위 예외에는 거래 원문이나 인증정보가 포함될 수 있으므로
                 # 원문과 traceback을 기록하지 않습니다.
@@ -108,22 +108,19 @@ class TransactionClassificationService:
             transaction.transactionId for transaction in unclassified_transactions
         }
 
-        if llm_used_fallback:
-            llm_result_map: dict[int, TransactionClassificationResult] = {}
-        else:
-            result_counts = Counter(
-                result.transactionId
-                for result in llm_results
-                if result.transactionId in unclassified_ids
-            )
+        result_counts = Counter(
+            result.transactionId
+            for result in llm_results
+            if result.transactionId in unclassified_ids
+        )
 
-            llm_result_map = {
-                result.transactionId: result
-                for result in llm_results
-                if result.transactionId in unclassified_ids
-                and result_counts[result.transactionId] == 1
-                and self._is_valid_result(result)
-            }
+        llm_result_map = {
+            result.transactionId: result
+            for result in llm_results
+            if result.transactionId in unclassified_ids
+            and result_counts[result.transactionId] == 1
+            and self._is_valid_result(result)
+        }
 
         final_results: list[TransactionClassificationResult] = []
 
@@ -144,13 +141,16 @@ class TransactionClassificationService:
 
         total_elapsed_ms = int((time.perf_counter() - started_at) * 1000)
         result_count = len(llm_result_map)
-        fallback_count = transaction_count - len(rule_results) - result_count
+        rule_count = len(rule_results)
+        fallback_count = transaction_count - rule_count - result_count
         success = fallback_count == 0
 
         logger.info(
-            "[거래 분류 완료] transactionCount=%d, llmTargetCount=%d, resultCount=%d, fallbackCount=%d, elapsedMs=%d, success=%s",
+            "[거래 분류 완료] transactionCount=%d, ruleCount=%d, llmTargetCount=%d, chunkCount=%d, resultCount=%d, fallbackCount=%d, totalElapsedMs=%d, success=%s",
             transaction_count,
+            rule_count,
             llm_target_count,
+            chunk_count,
             result_count,
             fallback_count,
             total_elapsed_ms,

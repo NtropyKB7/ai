@@ -18,12 +18,12 @@ class Settings(BaseSettings):
         le=16,
     )
     OPENAI_CLASSIFICATION_HTTP_TIMEOUT_SECONDS: float = Field(
-        default=15.0,
+        default=25.0,
         gt=0,
         le=120.0,
     )
     OPENAI_CLASSIFICATION_TIMEOUT_SECONDS: float = Field(
-        default=20.0,
+        default=30.0,
         gt=0,
         le=120.0,
     )
@@ -31,6 +31,11 @@ class Settings(BaseSettings):
         default=0,
         ge=0,
         le=1,
+    )
+    OPENAI_CLASSIFICATION_CHUNK_SIZE: int = Field(
+        default=20,
+        ge=1,
+        le=100,
     )
 
     # Finlife HTTP access is optional until the explicit collector/CLI is used.
