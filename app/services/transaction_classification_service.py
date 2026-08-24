@@ -1,5 +1,8 @@
+import asyncio
+import inspect
 import logging
 import re
+import time
 from collections import Counter
 from typing import Optional
 
@@ -9,6 +12,7 @@ from app.schemas.transaction import (
     TransactionClassificationResult,
     TransactionForClassification,
 )
+from app.services.llm_service import LLMClassificationOutcome
 from app.services.transaction_description_normalizer import (
     normalize_transaction_description,
 )
@@ -34,11 +38,23 @@ class TransactionClassificationService:
         FastAPI 라우터의 기존 비동기 호출 계약을 유지합니다.
 
         실제 규칙·LLM 분류와 fallback 처리는
-        classify_transactions()에서 수행합니다.
+        classify_transactions_async()에서 수행합니다.
         """
-        return self.classify_transactions(transactions)
+        return await self.classify_transactions_async(transactions)
 
     def classify_transactions(
+        self,
+        transactions: list[TransactionForClassification],
+    ) -> list[TransactionClassificationResult]:
+        """
+        기존 동기 호출 호환성을 위한 래퍼입니다.
+
+        실제 FastAPI 경로는 classify_transactions_with_llm() ->
+        classify_transactions_async()를 사용합니다.
+        """
+        return asyncio.run(self.classify_transactions_async(transactions))
+
+    async def classify_transactions_async(
         self,
         transactions: list[TransactionForClassification],
     ) -> list[TransactionClassificationResult]:
@@ -51,6 +67,8 @@ class TransactionClassificationService:
         3. LLM 결과 검증
         4. 최종 실패 거래 ETC / VARIABLE 처리
         """
+        started_at = time.perf_counter()
+        transaction_count = len(transactions)
         rule_results: dict[int, TransactionClassificationResult] = {}
         unclassified_transactions: list[TransactionForClassification] = []
 
@@ -63,35 +81,49 @@ class TransactionClassificationService:
                 unclassified_transactions.append(transaction)
 
         llm_results: list[TransactionClassificationResult] = []
+        llm_target_count = len(unclassified_transactions)
+        llm_used_fallback = False
 
         if unclassified_transactions and self.llm_service:
             try:
-                llm_results = self.llm_service.classify_with_llm(
+                llm_call = self.llm_service.classify_with_llm(
                     unclassified_transactions
                 )
+                if inspect.isawaitable(llm_call):
+                    llm_outcome = await llm_call
+                else:
+                    llm_outcome = llm_call
+                if isinstance(llm_outcome, LLMClassificationOutcome):
+                    llm_used_fallback = not llm_outcome.success
+                    if llm_outcome.success:
+                        llm_results = llm_outcome.results
+                else:
+                    llm_results = list(llm_outcome or [])
             except Exception:
                 # 하위 예외에는 거래 원문이나 인증정보가 포함될 수 있으므로
                 # 원문과 traceback을 기록하지 않습니다.
                 logger.error("LLM transaction classification failed")
 
         unclassified_ids = {
-            transaction.transactionId
-            for transaction in unclassified_transactions
+            transaction.transactionId for transaction in unclassified_transactions
         }
 
-        result_counts = Counter(
-            result.transactionId
-            for result in llm_results
-            if result.transactionId in unclassified_ids
-        )
+        if llm_used_fallback:
+            llm_result_map: dict[int, TransactionClassificationResult] = {}
+        else:
+            result_counts = Counter(
+                result.transactionId
+                for result in llm_results
+                if result.transactionId in unclassified_ids
+            )
 
-        llm_result_map = {
-            result.transactionId: result
-            for result in llm_results
-            if result.transactionId in unclassified_ids
-            and result_counts[result.transactionId] == 1
-            and self._is_valid_result(result)
-        }
+            llm_result_map = {
+                result.transactionId: result
+                for result in llm_results
+                if result.transactionId in unclassified_ids
+                and result_counts[result.transactionId] == 1
+                and self._is_valid_result(result)
+            }
 
         final_results: list[TransactionClassificationResult] = []
 
@@ -110,11 +142,19 @@ class TransactionClassificationService:
                 self._create_fallback_result(transaction_id)
             )
 
+        total_elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        result_count = len(llm_result_map)
+        fallback_count = transaction_count - len(rule_results) - result_count
+        success = fallback_count == 0
+
         logger.info(
-            "Transaction classification completed: rule=%d llm=%d fallback=%d",
-            len(rule_results),
-            len(llm_result_map),
-            len(transactions) - len(rule_results) - len(llm_result_map),
+            "[거래 분류 완료] transactionCount=%d, llmTargetCount=%d, resultCount=%d, fallbackCount=%d, elapsedMs=%d, success=%s",
+            transaction_count,
+            llm_target_count,
+            result_count,
+            fallback_count,
+            total_elapsed_ms,
+            str(success).lower(),
         )
 
         return final_results

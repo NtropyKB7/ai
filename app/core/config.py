@@ -1,6 +1,6 @@
 from typing import Optional
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings
 
 
@@ -12,6 +12,26 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str
     OPENAI_CLASSIFICATION_MODEL: str = "gpt-5-nano"
     OPENAI_GENERATION_MODEL: str = "gpt-4o-mini"
+    OPENAI_CLASSIFICATION_MAX_CONCURRENCY: int = Field(
+        default=4,
+        ge=1,
+        le=16,
+    )
+    OPENAI_CLASSIFICATION_HTTP_TIMEOUT_SECONDS: float = Field(
+        default=15.0,
+        gt=0,
+        le=120.0,
+    )
+    OPENAI_CLASSIFICATION_TIMEOUT_SECONDS: float = Field(
+        default=20.0,
+        gt=0,
+        le=120.0,
+    )
+    OPENAI_CLASSIFICATION_MAX_RETRIES: int = Field(
+        default=0,
+        ge=0,
+        le=1,
+    )
 
     # Finlife HTTP access is optional until the explicit collector/CLI is used.
     FINLIFE_API_KEY: Optional[SecretStr] = None

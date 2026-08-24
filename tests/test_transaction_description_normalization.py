@@ -1,4 +1,5 @@
 import json
+import asyncio
 from copy import deepcopy
 from unittest.mock import Mock
 
@@ -99,7 +100,7 @@ def test_llm_receives_original_and_normalized_description(monkeypatch):
     captured = {}
 
     class Chain:
-        def invoke(self, values):
+        async def ainvoke(self, values):
             captured.update(values)
             return LLMTransactionClassificationResponse(
                 results=[
@@ -125,10 +126,10 @@ def test_llm_receives_original_and_normalized_description(monkeypatch):
         lambda messages: Prompt(),
     )
 
-    result = service.classify_with_llm([transaction("카카오페이_공차")])
+    outcome = asyncio.run(service.classify_with_llm([transaction("카카오페이_공차")]))
     payload = json.loads(captured["transactions_json"])[0]
 
-    assert result[0].category == ExpenseCategory.FOOD
+    assert outcome.results[0].category == ExpenseCategory.FOOD
     assert payload["originalDescription"] == "카카오페이_공차"
     assert payload["paymentMethod"] == "카카오페이"
     assert payload["merchantCandidate"] == "공차"

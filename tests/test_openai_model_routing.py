@@ -4,7 +4,13 @@ import logging
 from app.core.config import Settings
 from app.api import router as router_module
 from app.schemas.product import FinancialProductSchema, ProductRecommendationRequest
-from app.schemas.transaction import TransactionForClassification
+from app.schemas.transaction import (
+    ExpenseCategory,
+    ExpenseType,
+    LLMTransactionClassificationResponse,
+    TransactionClassificationResult,
+    TransactionForClassification,
+)
 from app.services import llm_service as llm_service_module
 from app.services import recommendation_service as recommendation_service_module
 
@@ -86,7 +92,7 @@ def test_classification_failure_does_not_log_exception_details(
     caplog,
 ):
     class _FailingChain:
-        def invoke(self, payload):
+        async def ainvoke(self, payload):
             raise RuntimeError("secret-auth-value")
 
     class _Prompt:
@@ -106,14 +112,62 @@ def test_classification_failure_does_not_log_exception_details(
         amount=1000,
         transactionCategory="ORDINARY",
         organizationCode="0001",
-        desc1="synthetic",
+        desc1="민감한가맹점",
     )
 
     with caplog.at_level(logging.ERROR):
-        results = service.classify_with_llm([transaction])
+        outcome = asyncio.run(service.classify_with_llm([transaction]))
 
-    assert results[0].transactionId == 1
+    assert outcome.results[0].transactionId == 1
     assert "secret-auth-value" not in caplog.text
+    assert "민감한가맹점" not in caplog.text
+
+
+def test_classification_success_logs_counts_without_sensitive_data(
+    monkeypatch,
+    caplog,
+):
+    class _SuccessChain:
+        async def ainvoke(self, payload):
+            return LLMTransactionClassificationResponse(
+                results=[
+                    TransactionClassificationResult(
+                        transactionId=1,
+                        isConsumption=True,
+                        category=ExpenseCategory.FOOD,
+                        expenseType=ExpenseType.VARIABLE,
+                    )
+                ]
+            )
+
+    class _Prompt:
+        def __or__(self, other):
+            return _SuccessChain()
+
+    service = object.__new__(llm_service_module.LLMService)
+    service.llm = object()
+    service.system_prompt = "classification prompt"
+    monkeypatch.setattr(
+        llm_service_module.ChatPromptTemplate,
+        "from_messages",
+        lambda messages: _Prompt(),
+    )
+    transaction = TransactionForClassification(
+        transactionId=1,
+        amount=1000,
+        transactionCategory="ORDINARY",
+        organizationCode="0001",
+        desc1="민감한가맹점",
+    )
+
+    with caplog.at_level(logging.INFO):
+        outcome = asyncio.run(service.classify_with_llm([transaction]))
+
+    assert outcome.success is True
+    assert "[거래 분류 LLM] 호출 완료" in caplog.text
+    assert "llmTargetCount=1" in caplog.text
+    assert "rawResultCount=1" in caplog.text
+    assert "민감한가맹점" not in caplog.text
 
 
 def test_recommendation_failure_keeps_deterministic_fallback_and_safe_log(
